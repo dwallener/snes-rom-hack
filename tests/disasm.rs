@@ -181,6 +181,7 @@ fn decodes_stateful_immediate_width() {
             emulation: Some(false),
             m_flag: Some(true),
             x_flag: Some(true),
+            carry_flag: None,
         },
     );
     assert_eq!(rep.mnemonic, "rep");
@@ -322,4 +323,34 @@ fn runtime_seed_pcs_expand_static_coverage() {
         .warnings
         .iter()
         .any(|warning| warning.contains("runtime-derived PCs")));
+}
+
+#[test]
+fn xce_after_clc_preserves_width_information() {
+    let bytes = [0x18, 0xFB, 0xC2, 0x10, 0xA2, 0x34, 0x12];
+
+    let clc = decode_instruction(&bytes, 0, &DecodeState::reset_state());
+    let xce = decode_instruction(&bytes, clc.length, clc.state_out.as_ref().unwrap());
+    let rep = decode_instruction(&bytes, clc.length + xce.length, xce.state_out.as_ref().unwrap());
+    let ldx = decode_instruction(
+        &bytes,
+        clc.length + xce.length + rep.length,
+        rep.state_out.as_ref().unwrap(),
+    );
+
+    assert_eq!(xce.state_out.as_ref().unwrap().emulation, Some(false));
+    assert_eq!(rep.state_out.as_ref().unwrap().x_flag, Some(false));
+    assert_eq!(ldx.mnemonic, "ldx");
+    assert_eq!(ldx.length, 3);
+}
+
+#[test]
+fn block_move_instruction_has_correct_length() {
+    let bytes = [0x54, 0x7F, 0x7F, 0xA2, 0x34, 0x12];
+    let mvn = decode_instruction(&bytes, 0, &DecodeState::reset_state());
+    let next = decode_instruction(&bytes, mvn.length, mvn.state_out.as_ref().unwrap());
+
+    assert_eq!(mvn.mnemonic, "mvn");
+    assert_eq!(mvn.length, 3);
+    assert_eq!(next.mnemonic, "ldx");
 }

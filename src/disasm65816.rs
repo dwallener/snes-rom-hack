@@ -8,6 +8,7 @@ pub struct DecodeState {
     pub emulation: Option<bool>,
     pub m_flag: Option<bool>,
     pub x_flag: Option<bool>,
+    pub carry_flag: Option<bool>,
 }
 
 impl DecodeState {
@@ -16,6 +17,7 @@ impl DecodeState {
             emulation: Some(true),
             m_flag: Some(true),
             x_flag: Some(true),
+            carry_flag: None,
         }
         .normalized()
     }
@@ -49,6 +51,7 @@ impl DecodeState {
             emulation: merge_flag(self.emulation, other.emulation),
             m_flag: merge_flag(self.m_flag, other.m_flag),
             x_flag: merge_flag(self.x_flag, other.x_flag),
+            carry_flag: merge_flag(self.carry_flag, other.carry_flag),
         }
         .normalized()
     }
@@ -943,14 +946,36 @@ pub fn decode_instruction(rom: &[u8], pc: usize, state: &DecodeState) -> Instruc
             apply_rep_sep(next, operand_bytes[0], true);
         }
     }
+    if meta.mnemonic == "clc" {
+        if let Some(next) = state_out.as_mut() {
+            next.carry_flag = Some(false);
+        }
+    }
+    if meta.mnemonic == "sec" {
+        if let Some(next) = state_out.as_mut() {
+            next.carry_flag = Some(true);
+        }
+    }
     if meta.mnemonic == "xce" {
         if let Some(next) = state_out.as_mut() {
-            next.emulation = None;
-            next.m_flag = None;
-            next.x_flag = None;
+            if let (Some(old_emulation), Some(old_carry)) = (state.emulation, state.carry_flag) {
+                next.emulation = Some(old_carry);
+                next.carry_flag = Some(old_emulation);
+                if next.emulation == Some(true) {
+                    next.m_flag = Some(true);
+                    next.x_flag = Some(true);
+                }
+            } else {
+                next.emulation = None;
+                next.m_flag = None;
+                next.x_flag = None;
+                next.carry_flag = None;
+            }
             *next = next.clone().normalized();
         }
-        notes.push("XCE makes mode width ambiguous without carry tracking".to_string());
+        if state.carry_flag.is_none() {
+            notes.push("XCE makes mode width ambiguous without carry tracking".to_string());
+        }
     }
 
     let (flow_type, target_pc, fallthrough_pc) =
@@ -1016,9 +1041,8 @@ fn operand_len(
         | AddressingMode::AbsoluteIndexedIndirect
         | AddressingMode::AbsoluteIndirectLong
         | AddressingMode::Relative16 => (2, "high"),
-        AddressingMode::AbsoluteLong
-        | AddressingMode::AbsoluteLongX
-        | AddressingMode::BlockMove => (3, "high"),
+        AddressingMode::AbsoluteLong | AddressingMode::AbsoluteLongX => (3, "high"),
+        AddressingMode::BlockMove => (2, "high"),
     }
 }
 
