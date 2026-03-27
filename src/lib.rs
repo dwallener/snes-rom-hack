@@ -5,6 +5,7 @@ pub mod cli;
 pub mod disasm65816;
 pub mod evidence;
 pub mod mapper;
+pub mod player_gfx;
 pub mod rommap;
 pub mod replacement;
 pub mod runtime;

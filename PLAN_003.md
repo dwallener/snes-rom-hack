@@ -124,6 +124,42 @@ It is now:
 - inspect `loc_80_8F1E` second for upload orchestration
 - treat `nmi_entry` as the execution context, not the likely asset selector
 
+## Graphics Verdict
+
+The playable-character graphics question is now much narrower than it was at the start of this plan.
+
+What changed:
+
+- the repeated `sub_80_A39A` batch around `$80:BCB2-$80:BD1E` is now decoded into concrete ROM-source / VRAM-destination pairs
+- a dedicated report command renders raw 4bpp previews for those source regions
+- the previews decode as recognizable sprite graphics, not compressed junk
+
+Concrete batch:
+
+- `$80:BCB2` -> ROM `$10:A880` -> VRAM `$6000`
+- `$80:BCBE` -> ROM `$10:C800` -> VRAM `$6040`
+- `$80:BCCA` -> ROM `$11:8880` -> VRAM `$6080`
+- `$80:BCD6` -> ROM `$11:A880` -> VRAM `$60C0`
+- `$80:BCE2` -> ROM `$10:C080` -> VRAM `$6400`
+- `$80:BCEE` -> ROM `$13:8000` -> VRAM `$6440`
+- `$80:BCFA` -> ROM `$12:C800` -> VRAM `$6480`
+- `$80:BD06` -> ROM `$12:B000` -> VRAM `$64C0`
+- `$80:BD12` -> ROM `$13:C880` -> VRAM `$6800`
+- `$80:BD1E` -> ROM `$13:9000` -> VRAM `$6840`
+
+Artifacts:
+
+- [docs/PLAYER_GFX_FINDINGS.md](/Users/damir00/Sandbox/snes-rom-hack/docs/PLAYER_GFX_FINDINGS.md)
+- [out/pocky-player-gfx/player_gfx_summary.txt](/Users/damir00/Sandbox/snes-rom-hack/out/pocky-player-gfx/player_gfx_summary.txt)
+- [out/pocky-player-gfx/previews](/Users/damir00/Sandbox/snes-rom-hack/out/pocky-player-gfx/previews)
+
+Current interpretation:
+
+- this batch is character/sprite-side graphics, not just generic background setup
+- the art is present in raw modifiable ROM form
+- the remaining work is not “is it swappable?”
+- the remaining work is “which exact entries are Pocky, which are Rocky, and what is the safest first proof patch?”
+
 ## Primary Goal
 
 Build an asset-path recovery workflow that answers, for any observed upload:

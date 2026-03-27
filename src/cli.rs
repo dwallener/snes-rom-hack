@@ -3,6 +3,9 @@ use crate::annotate::run_annotate_evidence_cli;
 use crate::asset_paths::run_asset_paths_cli;
 use crate::capture::run_collect_trace_cli;
 use crate::mapper::pc_to_lorom;
+use crate::player_gfx::{
+    run_match_player_gfx_sheet_cli, run_patch_player_gfx_cli, run_player_gfx_report_cli,
+};
 use crate::replacement::run_replacement_report_cli;
 use crate::rommap::{format_reset_summary, load_rom};
 use crate::runtime::{
@@ -358,6 +361,18 @@ pub fn run_collect_trace_wrapper_cli(args: &[String]) -> io::Result<()> {
 
 pub fn run_replacement_cli(args: &[String]) -> io::Result<()> {
     run_replacement_report_cli(args)
+}
+
+pub fn run_player_gfx_cli(args: &[String]) -> io::Result<()> {
+    run_player_gfx_report_cli(args)
+}
+
+pub fn run_patch_player_gfx_wrapper_cli(args: &[String]) -> io::Result<()> {
+    run_patch_player_gfx_cli(args)
+}
+
+pub fn run_match_player_gfx_sheet_wrapper_cli(args: &[String]) -> io::Result<()> {
+    run_match_player_gfx_sheet_cli(args)
 }
 
 fn write_text(path: &Path, text: &str) -> io::Result<()> {

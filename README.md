@@ -98,6 +98,43 @@ cargo run -- asset-paths --events out/pocky/runtime/annotated_events.json --evid
 
 This now includes APU port activity as well, so sound-transfer routines can be surfaced alongside graphics-upload routines.
 
+For the current Pocky player/sprite batch, decode the `sub_80_A39A` graphics commands into concrete ROM sources and raw 4bpp previews:
+
+```bash
+cargo run -- player-gfx-report --rom roms-original/Pocky-n-Rocky/Pocky-n-Rocky.sfc --disasm out/pocky-seeded-plan3h/disasm.txt --out out/pocky-player-gfx
+```
+
+This emits:
+
+- `out/pocky-player-gfx/player_gfx_summary.txt`
+- `out/pocky-player-gfx/player_gfx_report.json`
+- `out/pocky-player-gfx/previews/*.png`
+
+Write a fixed-size proof patch directly into one decoded player graphics source region:
+
+```bash
+cargo run -- patch-player-gfx \
+  --rom roms-original/Pocky-n-Rocky/Pocky-n-Rocky.sfc \
+  --disasm out/pocky-seeded-plan3h/disasm.txt \
+  --callsite '$80:BCB2' \
+  --png artwork/SNES-Pocky-Sayo-chan.png \
+  --out out/pocky-sayo-proof.sfc
+```
+
+This keeps the ROM size fixed and overwrites only the chosen decoded source window.
+
+Attribute the decoded player batch against a supplied extracted character sheet:
+
+```bash
+cargo run -- match-player-gfx-sheet \
+  --rom roms-original/Pocky-n-Rocky/Pocky-n-Rocky.sfc \
+  --disasm out/pocky-seeded-plan3h/disasm.txt \
+  --sheet artwork/SNES-Pocky-Sayo-chan.png \
+  --out out/player-match-sayo
+```
+
+This emits a ranked summary of which decoded player-batch regions overlap that sheet.
+
 Or run the whole phase-2 pipeline in one shot:
 
 ```bash

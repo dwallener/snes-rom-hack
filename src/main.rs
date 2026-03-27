@@ -1,4 +1,4 @@
-use snes_rom_hack::cli::{run_annotate_cli, run_asset_paths_report_cli, run_collect_trace_wrapper_cli, run_disasm_cli, run_evidence_cli, run_phase2_cli, run_replacement_cli, run_runtime_correlate_cli, run_usage_import_cli};
+use snes_rom_hack::cli::{run_annotate_cli, run_asset_paths_report_cli, run_collect_trace_wrapper_cli, run_disasm_cli, run_evidence_cli, run_match_player_gfx_sheet_wrapper_cli, run_patch_player_gfx_wrapper_cli, run_phase2_cli, run_player_gfx_cli, run_replacement_cli, run_runtime_correlate_cli, run_usage_import_cli};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -57,6 +57,15 @@ fn run_cli() -> io::Result<()> {
     }
     if matches!(args.first().map(String::as_str), Some("replacement-report")) {
         return run_replacement_cli(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("player-gfx-report")) {
+        return run_player_gfx_cli(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("patch-player-gfx")) {
+        return run_patch_player_gfx_wrapper_cli(&args[1..]);
+    }
+    if matches!(args.first().map(String::as_str), Some("match-player-gfx-sheet")) {
+        return run_match_player_gfx_sheet_wrapper_cli(&args[1..]);
     }
     if matches!(args.first().map(String::as_str), Some("match-sheet")) {
         return run_match_sheet(&args[1..]);
