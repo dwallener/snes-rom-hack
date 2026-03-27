@@ -269,6 +269,8 @@ local shadow = {{
   last_phase = "",
   write_counts = {{}},
   write_count_frame = -1,
+  wram_write_counts = {{}},
+  wram_write_count_frame = -1,
 }}
 local trace_handle = nil
 
@@ -350,6 +352,53 @@ local function note_write(kind, address, value)
     {{"scanline", tostring(entry.scanline)}},
     {{"pc", "\"0x" .. hex(pc, 6) .. "\""}},
     {{"address", "\"0x" .. hex(address, 4) .. "\""}},
+    {{"value", tostring(value)}}
+  }})
+end
+
+local function workram_to_snes(address)
+  if address < 0x10000 then
+    return 0x7E0000 | (address & 0xFFFF)
+  end
+  return 0x7F0000 | ((address - 0x10000) & 0xFFFF)
+end
+
+local function note_wram_write(region, address, value)
+  local s = emu.getState()
+  local pc = get_pc()
+  local frame = s["frameCount"] or -1
+  if frame ~= shadow.wram_write_count_frame then
+    shadow.wram_write_count_frame = frame
+    shadow.wram_write_counts = {{}}
+  end
+
+  local count = shadow.wram_write_counts[region] or 0
+  if count >= 32 then
+    return
+  end
+  shadow.wram_write_counts[region] = count + 1
+
+  local snes = workram_to_snes(address)
+  local bank = (snes >> 16) & 0xFF
+  local addr16 = snes & 0xFFFF
+  local entry = {{
+    frame = frame,
+    scanline = s["ppu.scanline"] or -1,
+    pc = pc,
+    kind = "wram_stage_write",
+    address = snes,
+    value = value
+  }}
+  table.insert(shadow.current, entry)
+  emit_json({{
+    {{"source", "\"mesen2_lua\""}},
+    {{"event", "\"wram_write\""}},
+    {{"kind", "\"wram_stage_write\""}},
+    {{"region", "\"" .. json_escape(region) .. "\""}},
+    {{"frame", tostring(entry.frame)}},
+    {{"scanline", tostring(entry.scanline)}},
+    {{"pc", "\"0x" .. hex(pc, 6) .. "\""}},
+    {{"address", "\"$" .. hex(bank, 2) .. ":" .. hex(addr16, 4) .. "\""}},
     {{"value", tostring(value)}}
   }})
 end
@@ -467,6 +516,14 @@ local function on_register_write(address, value)
     note_write("apu_io_reg", address, value)
     return
   end
+end
+
+local function on_palette_stage_write(address, value)
+  note_wram_write("palette_stage", address, value)
+end
+
+local function on_graphics_stage_write(address, value)
+  note_wram_write("graphics_stage", address, value)
 end
 
 local steps = {{
@@ -595,6 +652,8 @@ emu.addMemoryCallback(on_register_write, emu.callbackType.write, 0x2102, 0x2122)
 emu.addMemoryCallback(on_register_write, emu.callbackType.write, 0x2140, 0x2143)
 emu.addMemoryCallback(on_register_write, emu.callbackType.write, 0x420B, 0x420C)
 emu.addMemoryCallback(on_register_write, emu.callbackType.write, 0x4300, 0x437F)
+emu.addMemoryCallback(on_palette_stage_write, emu.callbackType.write, 0x02000, 0x023FF, emu.cpuType.snes, emu.memType.snesWorkRam)
+emu.addMemoryCallback(on_graphics_stage_write, emu.callbackType.write, 0x18000, 0x19FFF, emu.cpuType.snes, emu.memType.snesWorkRam)
 emu.addEventCallback(on_input_polled, emu.eventType.inputPolled)
 emu.addEventCallback(on_end_frame, emu.eventType.endFrame)
 "#
@@ -684,6 +743,9 @@ mod tests {
         assert!(script.contains("press_start_1"));
         assert!(script.contains("io.open(TRACE_PATH, \"w\")"));
         assert!(script.contains("emu.stop(0)"));
+        assert!(script.contains("emu.memType.snesWorkRam"));
+        assert!(script.contains("0x18000"));
+        assert!(script.contains("wram_stage_write"));
     }
 
     #[test]

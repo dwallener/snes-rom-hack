@@ -3,6 +3,7 @@ use crate::annotate::run_annotate_evidence_cli;
 use crate::asset_paths::run_asset_paths_cli;
 use crate::capture::run_collect_trace_cli;
 use crate::mapper::pc_to_lorom;
+use crate::replacement::run_replacement_report_cli;
 use crate::rommap::{format_reset_summary, load_rom};
 use crate::runtime::{
     correlate_runtime_lines, format_runtime_summary, load_labels_by_pc, load_runtime_cfg,
@@ -336,6 +337,10 @@ pub fn run_phase2_cli(args: &[String]) -> io::Result<()> {
 
 pub fn run_collect_trace_wrapper_cli(args: &[String]) -> io::Result<()> {
     run_collect_trace_cli(args)
+}
+
+pub fn run_replacement_cli(args: &[String]) -> io::Result<()> {
+    run_replacement_report_cli(args)
 }
 
 fn write_text(path: &Path, text: &str) -> io::Result<()> {

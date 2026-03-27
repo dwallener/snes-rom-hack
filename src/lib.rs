@@ -6,5 +6,6 @@ pub mod disasm65816;
 pub mod evidence;
 pub mod mapper;
 pub mod rommap;
+pub mod replacement;
 pub mod runtime;
 pub mod usage;

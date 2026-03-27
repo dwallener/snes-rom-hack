@@ -37,6 +37,7 @@ pub struct AnnotatedRuntimeEvent {
     pub dma_size: Option<String>,
     pub dma_hdma_table: Option<String>,
     pub dma_control: Option<String>,
+    pub region: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,9 +61,42 @@ pub struct RoutineActivity {
     pub cgram_events: usize,
     pub oam_events: usize,
     pub sound_events: usize,
+    pub wram_stage_events: usize,
     pub other_ppu_events: usize,
     pub register_writes: usize,
     pub frames: Vec<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeTransferEpisode {
+    pub start_frame: i64,
+    pub end_frame: i64,
+    pub total_events: usize,
+    pub dma_events: usize,
+    pub vram_events: usize,
+    pub cgram_events: usize,
+    pub oam_events: usize,
+    pub sound_events: usize,
+    pub registers: Vec<RegisterActivity>,
+    pub routines: Vec<LabelActivity>,
+    pub primary_routine: Option<String>,
+    pub producer_candidate: Option<String>,
+    pub staging_writer_candidate: Option<String>,
+    pub staging_writer_labels: Vec<LabelActivity>,
+    pub replacement_targets: Vec<String>,
+    pub staging_buffers: Vec<String>,
+    pub transfers: Vec<TransferDescriptor>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferDescriptor {
+    pub launch_kind: String,
+    pub source: String,
+    pub source_space: String,
+    pub destination: String,
+    pub size: String,
+    pub count: usize,
+    pub pipeline: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,11 +105,13 @@ pub struct RuntimeCorrelationReport {
     pub resolved_pc_count: usize,
     pub unresolved_pc_count: usize,
     pub block_resolved_count: usize,
+    pub ignored_line_count: usize,
     pub cfg_edge_count: usize,
     pub events_by_kind: BTreeMap<String, usize>,
     pub top_labels: Vec<LabelActivity>,
     pub top_registers: Vec<RegisterActivity>,
     pub top_routines: Vec<RoutineActivity>,
+    pub top_episodes: Vec<RuntimeTransferEpisode>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -102,6 +138,7 @@ struct ParsedRuntimeEvent {
     dma_size: Option<String>,
     dma_hdma_table: Option<String>,
     dma_control: Option<String>,
+    region: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -112,9 +149,25 @@ struct RoutineAccumulator {
     cgram_events: usize,
     oam_events: usize,
     sound_events: usize,
+    wram_stage_events: usize,
     other_ppu_events: usize,
     register_writes: usize,
     frames: BTreeMap<i64, ()>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EpisodeAccumulator {
+    start_frame: i64,
+    end_frame: i64,
+    total_events: usize,
+    dma_events: usize,
+    vram_events: usize,
+    cgram_events: usize,
+    oam_events: usize,
+    sound_events: usize,
+    registers: BTreeMap<String, usize>,
+    routines: BTreeMap<String, usize>,
+    transfers: BTreeMap<(String, String, String, String, String, String), usize>,
 }
 
 pub fn correlate_runtime_lines(
@@ -129,22 +182,34 @@ pub fn correlate_runtime_lines(
     let mut routine_counts = BTreeMap::<String, RoutineAccumulator>::new();
     let mut resolved_pc_count = 0usize;
     let mut block_resolved_count = 0usize;
+    let mut ignored_line_count = 0usize;
+
+    let non_empty_line_indexes = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (!line.trim().is_empty()).then_some(index))
+        .collect::<Vec<_>>();
+    let last_non_empty_line = non_empty_line_indexes.last().copied();
 
     for (index, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let parsed = parse_runtime_json_line(line).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("line {}: {error}", index + 1),
-            )
-        })?;
+        let parsed = match parse_runtime_json_line(line) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                if Some(index) == last_non_empty_line && looks_like_truncated_json(line, &error) {
+                    ignored_line_count += 1;
+                    continue;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("line {}: {error}", index + 1),
+                ));
+            }
+        };
 
-        let pc_offset = parsed
-            .pc
-            .and_then(|pc| snes24_to_lorom_pc(pc))
-            .filter(|pc| labels_by_pc.is_empty() || pc_in_cfg(cfg, *pc));
+        let pc_offset = parsed.pc.and_then(snes24_to_lorom_pc);
         let pc_snes = pc_offset.map(|pc| pc_to_lorom(pc).format_snes());
         let label = pc_offset.and_then(|pc| labels_by_pc.get(&pc).cloned());
         let nearest_label = pc_offset.and_then(|pc| {
@@ -186,6 +251,7 @@ pub fn correlate_runtime_lines(
             .clone()
             .or_else(|| subroutine.clone())
             .or_else(|| nearest_label.clone())
+            .or_else(|| pc_snes.clone())
         {
             let bucket = classify_runtime_event(&parsed.kind, parsed.address);
             let entry = routine_counts.entry(name).or_default();
@@ -199,6 +265,7 @@ pub fn correlate_runtime_lines(
                 RegisterClass::Cgram => entry.cgram_events += 1,
                 RegisterClass::Oam => entry.oam_events += 1,
                 RegisterClass::ApuIo => entry.sound_events += 1,
+                RegisterClass::WramStage => entry.wram_stage_events += 1,
                 RegisterClass::OtherPpu => entry.other_ppu_events += 1,
                 RegisterClass::None => {}
             }
@@ -236,6 +303,7 @@ pub fn correlate_runtime_lines(
             dma_size: parsed.dma_size,
             dma_hdma_table: parsed.dma_hdma_table,
             dma_control: parsed.dma_control,
+            region: parsed.region,
         });
     }
 
@@ -245,11 +313,13 @@ pub fn correlate_runtime_lines(
             resolved_pc_count,
             unresolved_pc_count: events.len().saturating_sub(resolved_pc_count),
             block_resolved_count,
+            ignored_line_count,
             cfg_edge_count: cfg.edges.len(),
             events_by_kind,
             top_labels: top_label_counts(label_counts),
             top_registers: top_register_counts(register_counts),
             top_routines: top_routine_counts(routine_counts),
+            top_episodes: top_transfer_episodes(&events),
         },
         events,
     })
@@ -300,6 +370,7 @@ fn top_routine_counts(map: BTreeMap<String, RoutineAccumulator>) -> Vec<RoutineA
             cgram_events: counts.cgram_events,
             oam_events: counts.oam_events,
             sound_events: counts.sound_events,
+            wram_stage_events: counts.wram_stage_events,
             other_ppu_events: counts.other_ppu_events,
             register_writes: counts.register_writes,
             frames: counts.frames.into_keys().collect(),
@@ -307,10 +378,246 @@ fn top_routine_counts(map: BTreeMap<String, RoutineAccumulator>) -> Vec<RoutineA
         .collect()
 }
 
-fn pc_in_cfg(cfg: &RuntimeCfg, pc: usize) -> bool {
-    cfg.blocks
+fn top_transfer_episodes(events: &[AnnotatedRuntimeEvent]) -> Vec<RuntimeTransferEpisode> {
+    let mut episodes = Vec::<EpisodeAccumulator>::new();
+    for event in events {
+        let Some(frame) = event.frame else {
+            continue;
+        };
+        let class = classify_runtime_event(&event.kind, event.address.as_deref().and_then(parse_u32));
+        if matches!(class, RegisterClass::None | RegisterClass::WramStage) {
+            continue;
+        }
+
+        let start_new = episodes
+            .last()
+            .map(|episode| frame > episode.end_frame + 1)
+            .unwrap_or(true);
+        if start_new {
+            episodes.push(EpisodeAccumulator {
+                start_frame: frame,
+                end_frame: frame,
+                ..EpisodeAccumulator::default()
+            });
+        }
+
+        let episode = episodes.last_mut().expect("episode exists");
+        episode.end_frame = frame;
+        episode.total_events += 1;
+        match class {
+            RegisterClass::Dma => episode.dma_events += 1,
+            RegisterClass::Vram => episode.vram_events += 1,
+            RegisterClass::Cgram => episode.cgram_events += 1,
+            RegisterClass::Oam => episode.oam_events += 1,
+            RegisterClass::ApuIo => episode.sound_events += 1,
+            RegisterClass::WramStage | RegisterClass::OtherPpu | RegisterClass::None => {}
+        }
+        if let Some(address) = &event.address {
+            *episode.registers.entry(address.clone()).or_insert(0) += 1;
+        }
+        if let Some(name) = event
+            .label
+            .clone()
+            .or_else(|| event.subroutine.clone())
+            .or_else(|| event.nearest_label.clone())
+        {
+            *episode.routines.entry(name).or_insert(0) += 1;
+        }
+        if let Some(transfer) = transfer_key_for_event(event) {
+            *episode.transfers.entry(transfer).or_insert(0) += 1;
+        }
+    }
+
+    let mut out = episodes
+        .into_iter()
+        .map(|episode| {
+            let routines = top_label_counts(episode.routines.clone());
+            let registers = top_register_counts(episode.registers);
+            let transfers = top_transfer_descriptors(episode.transfers.clone());
+            let staging_buffers = derive_staging_buffers(&transfers);
+            let staging_writer_labels = top_label_counts(find_staging_writer_counts(
+                events,
+                episode.start_frame,
+                episode.end_frame,
+                &transfers,
+            ));
+            RuntimeTransferEpisode {
+                start_frame: episode.start_frame,
+                end_frame: episode.end_frame,
+                total_events: episode.total_events,
+                dma_events: episode.dma_events,
+                vram_events: episode.vram_events,
+                cgram_events: episode.cgram_events,
+                oam_events: episode.oam_events,
+                sound_events: episode.sound_events,
+                primary_routine: routines.first().map(|item| item.name.clone()),
+                producer_candidate: select_producer_candidate(&routines),
+                staging_writer_candidate: select_producer_candidate(&staging_writer_labels),
+                staging_writer_labels,
+                replacement_targets: derive_replacement_targets(&transfers),
+                staging_buffers,
+                routines,
+                registers,
+                transfers,
+            }
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        right
+            .total_events
+            .cmp(&left.total_events)
+            .then_with(|| left.start_frame.cmp(&right.start_frame))
+    });
+    out.truncate(12);
+    out
+}
+
+fn find_staging_writer_counts(
+    events: &[AnnotatedRuntimeEvent],
+    start_frame: i64,
+    end_frame: i64,
+    transfers: &[TransferDescriptor],
+) -> BTreeMap<String, usize> {
+    if transfers.is_empty() {
+        return BTreeMap::new();
+    }
+    let lookback_start = start_frame.saturating_sub(30);
+    let mut counts = BTreeMap::new();
+    for event in events {
+        if event.kind != "wram_stage_write" {
+            continue;
+        }
+        let Some(frame) = event.frame else {
+            continue;
+        };
+        if frame < lookback_start || frame > end_frame {
+            continue;
+        }
+        if !matches_event_transfer_range(event, transfers) {
+            continue;
+        }
+        if let Some(name) = event
+            .label
+            .clone()
+            .or_else(|| event.subroutine.clone())
+            .or_else(|| event.nearest_label.clone())
+            .or_else(|| event.pc_snes.clone())
+        {
+            *counts.entry(name).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn matches_event_transfer_range(
+    event: &AnnotatedRuntimeEvent,
+    transfers: &[TransferDescriptor],
+) -> bool {
+    let Some(event_address) = event.address.as_deref().and_then(parse_u32) else {
+        return false;
+    };
+    transfers.iter().any(|transfer| {
+        if transfer.source_space != "wram" {
+            return false;
+        }
+        let Some(start) = parse_u32(&transfer.source) else {
+            return false;
+        };
+        let Some(size) = parse_u32(&transfer.size) else {
+            return false;
+        };
+        let end = start.saturating_add(size.max(1));
+        start <= event_address && event_address < end
+    })
+}
+
+fn derive_replacement_targets(transfers: &[TransferDescriptor]) -> Vec<String> {
+    let mut targets = BTreeMap::<String, ()>::new();
+    for transfer in transfers {
+        let target = match transfer.destination.as_str() {
+            "cgram" => "palette",
+            "vram" => "graphics",
+            "oam" => "sprite_attr",
+            "bbus_$2140" | "bbus_$2141" | "bbus_$2142" | "bbus_$2143" => "sound",
+            _ => continue,
+        };
+        targets.insert(target.to_string(), ());
+    }
+    targets.into_keys().collect()
+}
+
+fn derive_staging_buffers(transfers: &[TransferDescriptor]) -> Vec<String> {
+    let mut buffers = BTreeMap::<String, ()>::new();
+    for transfer in transfers {
+        if transfer.source_space == "wram" {
+            buffers.insert(transfer.source.clone(), ());
+        }
+    }
+    buffers.into_keys().collect()
+}
+
+fn top_transfer_descriptors(
+    transfers: BTreeMap<(String, String, String, String, String, String), usize>,
+) -> Vec<TransferDescriptor> {
+    let mut items = transfers.into_iter().collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    items.truncate(8);
+    items.into_iter()
+        .map(
+            |((launch_kind, source, source_space, destination, size, pipeline), count)| {
+                TransferDescriptor {
+                    launch_kind,
+                    source,
+                    source_space,
+                    destination,
+                    size,
+                    count,
+                    pipeline,
+                }
+            },
+        )
+        .collect()
+}
+
+fn transfer_key_for_event(
+    event: &AnnotatedRuntimeEvent,
+) -> Option<(String, String, String, String, String, String)> {
+    if !matches!(event.kind.as_str(), "dma_channel" | "hdma_channel") {
+        return None;
+    }
+    let launch_kind = event
+        .launch_kind
+        .clone()
+        .unwrap_or_else(|| "DMA".to_string());
+    let source = event
+        .dma_source
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let source_space = classify_dma_source_space(&source);
+    let destination = event
+        .dma_bbus
+        .as_deref()
+        .map(classify_dma_destination)
+        .unwrap_or_else(|| "unknown".to_string());
+    let size = event
+        .dma_size
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let pipeline = classify_transfer_pipeline(&source_space, &destination);
+    Some((launch_kind, source, source_space, destination, size, pipeline))
+}
+
+fn select_producer_candidate(routines: &[LabelActivity]) -> Option<String> {
+    routines
         .iter()
-        .any(|block| block.start_pc <= pc && pc <= block.end_pc)
+        .find(|item| !matches!(item.name.as_str(), "nmi_entry" | "irq_entry" | "reset_entry"))
+        .or_else(|| routines.first())
+        .map(|item| item.name.clone())
 }
 
 fn is_subroutine_like(label: &str) -> bool {
@@ -327,6 +634,48 @@ fn snes24_to_lorom_pc(value: u32) -> Option<usize> {
     snes_to_lorom(bank, addr, usize::MAX)
 }
 
+fn classify_dma_source_space(source: &str) -> String {
+    let Some(value) = parse_u32(source) else {
+        return "unknown".to_string();
+    };
+    let bank = ((value >> 16) & 0xFF) as u8;
+    match bank {
+        0x7E | 0x7F => "wram".to_string(),
+        0x80..=0xFF => "rom".to_string(),
+        _ => {
+            let addr = (value & 0xFFFF) as u16;
+            if addr < 0x2000 {
+                "lowmem".to_string()
+            } else if addr >= 0x8000 {
+                "rom_mirror_or_cart".to_string()
+            } else {
+                "unknown".to_string()
+            }
+        }
+    }
+}
+
+fn classify_dma_destination(bbus: &str) -> String {
+    match bbus.trim() {
+        "$18" | "$19" => "vram".to_string(),
+        "$22" => "cgram".to_string(),
+        "$04" => "oam".to_string(),
+        "$00" => "hdma_table_or_io".to_string(),
+        other => format!("bbus_{other}"),
+    }
+}
+
+fn classify_transfer_pipeline(source_space: &str, destination: &str) -> String {
+    match (source_space, destination) {
+        ("rom", "vram" | "cgram" | "oam") => "direct_rom_upload".to_string(),
+        ("rom_mirror_or_cart", "vram" | "cgram" | "oam") => "direct_rom_upload".to_string(),
+        ("wram", "vram" | "cgram" | "oam") => "wram_staged_upload".to_string(),
+        ("lowmem", _) => "io_or_table_driven".to_string(),
+        ("wram", _) => "wram_staged_transfer".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegisterClass {
     None,
@@ -335,6 +684,7 @@ enum RegisterClass {
     Cgram,
     Oam,
     ApuIo,
+    WramStage,
     OtherPpu,
 }
 
@@ -377,6 +727,9 @@ fn classify_runtime_event(kind: &str, address: Option<u32>) -> RegisterClass {
     if matches!(kind, "apu_io_reg") {
         return RegisterClass::ApuIo;
     }
+    if matches!(kind, "wram_stage_write") {
+        return RegisterClass::WramStage;
+    }
     address
         .map(classify_runtime_register)
         .unwrap_or(RegisterClass::None)
@@ -396,6 +749,7 @@ fn is_register_write_kind(kind: &str) -> bool {
             | "cgram_reg"
             | "oam_reg"
             | "apu_io_reg"
+            | "wram_stage_write"
             | "register_write"
     )
 }
@@ -420,6 +774,7 @@ fn parse_runtime_json_line(line: &str) -> Result<ParsedRuntimeEvent, String> {
     let dma_size = get_string(&value, &["size"]);
     let dma_hdma_table = get_string(&value, &["hdma_table"]);
     let dma_control = get_string(&value, &["ctrl"]);
+    let region = get_string(&value, &["region"]);
 
     Ok(ParsedRuntimeEvent {
         source,
@@ -438,7 +793,17 @@ fn parse_runtime_json_line(line: &str) -> Result<ParsedRuntimeEvent, String> {
         dma_size,
         dma_hdma_table,
         dma_control,
+        region,
     })
+}
+
+fn looks_like_truncated_json(line: &str, error: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && !trimmed.ends_with('}')
+        && (error.contains("EOF while parsing")
+            || error.contains("unterminated")
+            || error.contains("expected"))
 }
 
 fn get_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -496,6 +861,8 @@ fn parse_u32(text: &str) -> Option<u32> {
 fn format_runtime_address(address: u32) -> String {
     if address <= 0xFFFF {
         format!("${address:04X}")
+    } else if address <= 0xFFFFFF {
+        format!("${:02X}:{:04X}", (address >> 16) & 0xFF, address & 0xFFFF)
     } else {
         format!("0x{address:06X}")
     }
@@ -505,11 +872,12 @@ pub fn format_runtime_summary(result: &RuntimeCorrelationResult) -> String {
     let mut out = String::new();
     out.push_str("; Runtime Correlation Summary\n");
     out.push_str(&format!(
-        "; events={} resolved_pc={} unresolved_pc={} block_resolved={} cfg_edges={}\n",
+        "; events={} resolved_pc={} unresolved_pc={} block_resolved={} ignored_lines={} cfg_edges={}\n",
         result.report.event_count,
         result.report.resolved_pc_count,
         result.report.unresolved_pc_count,
         result.report.block_resolved_count,
+        result.report.ignored_line_count,
         result.report.cfg_edge_count
     ));
     if !result.report.events_by_kind.is_empty() {
@@ -534,7 +902,7 @@ pub fn format_runtime_summary(result: &RuntimeCorrelationResult) -> String {
         out.push_str("\n; Hot routines\n");
         for item in &result.report.top_routines {
             out.push_str(&format!(
-                "; {}: total={} dma={} vram={} cgram={} oam={} sound={} ppu_other={} reg_writes={} frames={:?}\n",
+                "; {}: total={} dma={} vram={} cgram={} oam={} sound={} wram_stage={} ppu_other={} reg_writes={} frames={:?}\n",
                 item.name,
                 item.total_events,
                 item.dma_events,
@@ -542,10 +910,63 @@ pub fn format_runtime_summary(result: &RuntimeCorrelationResult) -> String {
                 item.cgram_events,
                 item.oam_events,
                 item.sound_events,
+                item.wram_stage_events,
                 item.other_ppu_events,
                 item.register_writes,
                 item.frames
             ));
+        }
+    }
+    if !result.report.top_episodes.is_empty() {
+        out.push_str("\n; Transfer episodes\n");
+        for item in &result.report.top_episodes {
+            out.push_str(&format!(
+                "; frames={}..{} total={} dma={} vram={} cgram={} oam={} sound={} primary={} producer={} staging_writer={} targets={:?} staging={:?} regs={:?}\n",
+                item.start_frame,
+                item.end_frame,
+                item.total_events,
+                item.dma_events,
+                item.vram_events,
+                item.cgram_events,
+                item.oam_events,
+                item.sound_events,
+                item.primary_routine.as_deref().unwrap_or("n/a"),
+                item.producer_candidate.as_deref().unwrap_or("n/a"),
+                item.staging_writer_candidate.as_deref().unwrap_or("n/a"),
+                item.replacement_targets,
+                item.staging_buffers,
+                item.registers
+                    .iter()
+                    .map(|item| format!("{}:{}", item.address, item.count))
+                    .collect::<Vec<_>>()
+            ));
+            if !item.staging_writer_labels.is_empty() {
+                out.push_str(&format!(
+                    ";   staging_writers={:?}\n",
+                    item.staging_writer_labels
+                        .iter()
+                        .map(|writer| format!("{}:{}", writer.name, writer.count))
+                        .collect::<Vec<_>>()
+                ));
+            }
+            if !item.transfers.is_empty() {
+                out.push_str(&format!(
+                    ";   transfers={:?}\n",
+                    item.transfers
+                        .iter()
+                        .map(|transfer| format!(
+                            "{} {} {} -> {} {} x{} {}",
+                            transfer.launch_kind,
+                            transfer.source_space,
+                            transfer.source,
+                            transfer.destination,
+                            transfer.size,
+                            transfer.count,
+                            transfer.pipeline
+                        ))
+                        .collect::<Vec<_>>()
+                ));
+            }
         }
     }
     out
@@ -668,6 +1089,7 @@ mod tests {
         assert_eq!(result.report.top_routines[0].dma_events, 1);
         assert_eq!(result.report.top_routines[0].vram_events, 1);
         assert_eq!(result.report.top_routines[0].sound_events, 0);
+        assert_eq!(result.report.top_routines[0].wram_stage_events, 0);
         assert_eq!(result.events[0].mask.as_deref(), Some("0x01"));
     }
 
@@ -687,6 +1109,7 @@ mod tests {
         assert_eq!(routine.dma_events, 2);
         assert_eq!(routine.oam_events, 1);
         assert_eq!(routine.sound_events, 0);
+        assert_eq!(routine.wram_stage_events, 0);
         assert_eq!(routine.register_writes, 3);
         assert_eq!(routine.frames, vec![7, 8]);
     }
@@ -716,5 +1139,70 @@ mod tests {
         let result = correlate_runtime_lines(&labels, &cfg_fixture(), &lines).unwrap();
         assert_eq!(result.events[0].address.as_deref(), Some("$2140"));
         assert_eq!(result.report.top_routines[0].sound_events, 1);
+    }
+
+    #[test]
+    fn ignores_truncated_final_json_line() {
+        let labels = BTreeMap::from([(0x10usize, "sub_80_8010".to_string())]);
+        let lines = vec![
+            r#"{"source":"mesen2_lua","kind":"dma_start","frame":7,"scanline":11,"pc":"0x808011","address":"0x420B","value":1}"#.to_string(),
+            r#"{"source":"mesen2_lua","kind":"oam_reg","frame":8,"scanline":12,"pc":"0x808012","address":"0x2104","value":"#.to_string(),
+        ];
+
+        let result = correlate_runtime_lines(&labels, &cfg_fixture(), &lines).unwrap();
+        assert_eq!(result.report.event_count, 1);
+        assert_eq!(result.report.ignored_line_count, 1);
+    }
+
+    #[test]
+    fn groups_transfer_episodes_and_prefers_non_nmi_producer() {
+        let labels = BTreeMap::from([
+            (0x10usize, "nmi_entry".to_string()),
+            (0x12usize, "loc_80_8012".to_string()),
+        ]);
+        let lines = vec![
+            r#"{"source":"mesen2_lua","kind":"dma_start","frame":10,"scanline":11,"pc":"0x808010","address":"0x420B","value":1}"#.to_string(),
+            r#"{"source":"mesen2_lua","kind":"dma_reg","frame":10,"scanline":12,"pc":"0x808012","address":"0x4302","value":64}"#.to_string(),
+            r#"{"source":"mesen2_lua","kind":"vram_reg","frame":11,"scanline":13,"pc":"0x808010","address":"0x2118","value":2}"#.to_string(),
+            r#"{"source":"mesen2_lua","kind":"dma_start","frame":20,"scanline":11,"pc":"0x808010","address":"0x420B","value":1}"#.to_string(),
+        ];
+
+        let result = correlate_runtime_lines(&labels, &cfg_fixture(), &lines).unwrap();
+        assert_eq!(result.report.top_episodes.len(), 2);
+        let first = &result.report.top_episodes[0];
+        assert_eq!(first.start_frame, 10);
+        assert_eq!(first.end_frame, 11);
+        assert_eq!(first.total_events, 3);
+        assert_eq!(first.primary_routine.as_deref(), Some("nmi_entry"));
+        assert_eq!(first.producer_candidate.as_deref(), Some("loc_80_8012"));
+        assert_eq!(first.staging_writer_candidate, None);
+        assert!(first.replacement_targets.is_empty());
+        assert!(first.staging_buffers.is_empty());
+    }
+
+    #[test]
+    fn attributes_staging_writers_to_matching_wram_buffers() {
+        let labels = BTreeMap::from([
+            (0x10usize, "nmi_entry".to_string()),
+            (0x12usize, "loc_80_8012".to_string()),
+        ]);
+        let lines = vec![
+            r#"{"source":"mesen2_lua","event":"wram_write","kind":"wram_stage_write","region":"graphics_stage","frame":9,"scanline":20,"pc":"0x808012","address":"$7F:8000","value":85}"#.to_string(),
+            r#"{"source":"mesen2_lua","event":"dma_channel","kind":"dma_channel","launch_kind":"DMA","frame":10,"scanline":22,"pc":"0x808010","channel":0,"src":"$7F:8000","bbus":"$18","size":"$1000","ctrl":"$01"}"#.to_string(),
+            r#"{"source":"mesen2_lua","kind":"vram_reg","frame":10,"scanline":23,"pc":"0x808010","address":"0x2118","value":2}"#.to_string(),
+        ];
+
+        let result = correlate_runtime_lines(&labels, &cfg_fixture(), &lines).unwrap();
+        let episode = &result.report.top_episodes[0];
+        assert_eq!(episode.staging_buffers, vec!["$7F:8000".to_string()]);
+        assert_eq!(episode.staging_writer_candidate.as_deref(), Some("loc_80_8012"));
+        assert_eq!(episode.staging_writer_labels[0].name, "loc_80_8012");
+        let helper = result
+            .report
+            .top_routines
+            .iter()
+            .find(|routine| routine.name == "loc_80_8012")
+            .expect("helper routine present");
+        assert_eq!(helper.wram_stage_events, 1);
     }
 }

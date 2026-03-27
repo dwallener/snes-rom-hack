@@ -28,6 +28,7 @@ fn sample_event(kind: &str) -> AnnotatedRuntimeEvent {
         dma_size: Some("$0040".to_string()),
         dma_hdma_table: None,
         dma_control: Some("$01".to_string()),
+        region: None,
     }
 }
 
