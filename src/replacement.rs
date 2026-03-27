@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub struct ReplacementCandidate {
     pub frames: String,
     pub producer: Option<String>,
+    pub queue_writer: Option<String>,
     pub staging_writer: Option<String>,
     pub primary_routine: Option<String>,
     pub targets: Vec<String>,
@@ -137,6 +138,11 @@ fn candidate_from_episode(episode: &RuntimeTransferEpisode) -> ReplacementCandid
     if episode.producer_candidate.is_some() && episode.primary_routine != episode.producer_candidate {
         notes.push("producer differs from primary hot routine".to_string());
     }
+    if episode.queue_writer_candidate.is_some()
+        && episode.queue_writer_candidate != episode.producer_candidate
+    {
+        notes.push("queue writer differs from upload-side producer".to_string());
+    }
     if episode.staging_writer_candidate.is_some()
         && episode.staging_writer_candidate != episode.producer_candidate
     {
@@ -149,6 +155,7 @@ fn candidate_from_episode(episode: &RuntimeTransferEpisode) -> ReplacementCandid
     ReplacementCandidate {
         frames: format!("{}..{}", episode.start_frame, episode.end_frame),
         producer: episode.producer_candidate.clone(),
+        queue_writer: episode.queue_writer_candidate.clone(),
         staging_writer: episode.staging_writer_candidate.clone(),
         primary_routine: episode.primary_routine.clone(),
         targets: episode.replacement_targets.clone(),
@@ -190,9 +197,10 @@ fn append_section(out: &mut String, title: &str, items: &[ReplacementCandidate])
     out.push_str(&format!("\n; {title}\n"));
     for item in items {
         out.push_str(&format!(
-            "; frames={} producer={} staging_writer={} primary={} staging={:?} transfers={:?} notes={:?}\n",
+            "; frames={} producer={} queue_writer={} staging_writer={} primary={} staging={:?} transfers={:?} notes={:?}\n",
             item.frames,
             item.producer.as_deref().unwrap_or("n/a"),
+            item.queue_writer.as_deref().unwrap_or("n/a"),
             item.staging_writer.as_deref().unwrap_or("n/a"),
             item.primary_routine.as_deref().unwrap_or("n/a"),
             item.staging_buffers,

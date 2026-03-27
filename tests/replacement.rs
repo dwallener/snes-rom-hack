@@ -37,6 +37,11 @@ fn groups_runtime_episodes_into_replacement_categories() {
             }],
             primary_routine: Some("nmi_entry".to_string()),
             producer_candidate: Some("loc_80_8F1E".to_string()),
+            queue_writer_candidate: Some("sub_80_89F0".to_string()),
+            queue_writer_labels: vec![LabelActivity {
+                name: "sub_80_89F0".to_string(),
+                count: 2,
+            }],
             staging_writer_candidate: Some("sub_80_9ABC".to_string()),
             staging_writer_labels: vec![LabelActivity {
                 name: "sub_80_9ABC".to_string(),
@@ -73,6 +78,10 @@ fn groups_runtime_episodes_into_replacement_categories() {
     assert_eq!(
         report.graphics_candidates[0].producer.as_deref(),
         Some("loc_80_8F1E")
+    );
+    assert_eq!(
+        report.graphics_candidates[0].queue_writer.as_deref(),
+        Some("sub_80_89F0")
     );
     assert_eq!(
         report.graphics_candidates[0].staging_writer.as_deref(),

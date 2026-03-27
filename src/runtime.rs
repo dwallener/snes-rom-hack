@@ -62,6 +62,7 @@ pub struct RoutineActivity {
     pub oam_events: usize,
     pub sound_events: usize,
     pub wram_stage_events: usize,
+    pub queue_write_events: usize,
     pub other_ppu_events: usize,
     pub register_writes: usize,
     pub frames: Vec<i64>,
@@ -81,6 +82,8 @@ pub struct RuntimeTransferEpisode {
     pub routines: Vec<LabelActivity>,
     pub primary_routine: Option<String>,
     pub producer_candidate: Option<String>,
+    pub queue_writer_candidate: Option<String>,
+    pub queue_writer_labels: Vec<LabelActivity>,
     pub staging_writer_candidate: Option<String>,
     pub staging_writer_labels: Vec<LabelActivity>,
     pub replacement_targets: Vec<String>,
@@ -150,6 +153,7 @@ struct RoutineAccumulator {
     oam_events: usize,
     sound_events: usize,
     wram_stage_events: usize,
+    queue_write_events: usize,
     other_ppu_events: usize,
     register_writes: usize,
     frames: BTreeMap<i64, ()>,
@@ -266,6 +270,7 @@ pub fn correlate_runtime_lines(
                 RegisterClass::Oam => entry.oam_events += 1,
                 RegisterClass::ApuIo => entry.sound_events += 1,
                 RegisterClass::WramStage => entry.wram_stage_events += 1,
+                RegisterClass::QueueWrite => entry.queue_write_events += 1,
                 RegisterClass::OtherPpu => entry.other_ppu_events += 1,
                 RegisterClass::None => {}
             }
@@ -371,6 +376,7 @@ fn top_routine_counts(map: BTreeMap<String, RoutineAccumulator>) -> Vec<RoutineA
             oam_events: counts.oam_events,
             sound_events: counts.sound_events,
             wram_stage_events: counts.wram_stage_events,
+            queue_write_events: counts.queue_write_events,
             other_ppu_events: counts.other_ppu_events,
             register_writes: counts.register_writes,
             frames: counts.frames.into_keys().collect(),
@@ -410,7 +416,10 @@ fn top_transfer_episodes(events: &[AnnotatedRuntimeEvent]) -> Vec<RuntimeTransfe
             RegisterClass::Cgram => episode.cgram_events += 1,
             RegisterClass::Oam => episode.oam_events += 1,
             RegisterClass::ApuIo => episode.sound_events += 1,
-            RegisterClass::WramStage | RegisterClass::OtherPpu | RegisterClass::None => {}
+            RegisterClass::WramStage
+            | RegisterClass::QueueWrite
+            | RegisterClass::OtherPpu
+            | RegisterClass::None => {}
         }
         if let Some(address) = &event.address {
             *episode.registers.entry(address.clone()).or_insert(0) += 1;
@@ -441,6 +450,11 @@ fn top_transfer_episodes(events: &[AnnotatedRuntimeEvent]) -> Vec<RuntimeTransfe
                 episode.end_frame,
                 &transfers,
             ));
+            let queue_writer_labels = top_label_counts(find_queue_writer_counts(
+                events,
+                episode.start_frame,
+                episode.end_frame,
+            ));
             RuntimeTransferEpisode {
                 start_frame: episode.start_frame,
                 end_frame: episode.end_frame,
@@ -452,6 +466,8 @@ fn top_transfer_episodes(events: &[AnnotatedRuntimeEvent]) -> Vec<RuntimeTransfe
                 sound_events: episode.sound_events,
                 primary_routine: routines.first().map(|item| item.name.clone()),
                 producer_candidate: select_producer_candidate(&routines),
+                queue_writer_candidate: select_producer_candidate(&queue_writer_labels),
+                queue_writer_labels,
                 staging_writer_candidate: select_producer_candidate(&staging_writer_labels),
                 staging_writer_labels,
                 replacement_targets: derive_replacement_targets(&transfers),
@@ -470,6 +486,36 @@ fn top_transfer_episodes(events: &[AnnotatedRuntimeEvent]) -> Vec<RuntimeTransfe
     });
     out.truncate(12);
     out
+}
+
+fn find_queue_writer_counts(
+    events: &[AnnotatedRuntimeEvent],
+    start_frame: i64,
+    end_frame: i64,
+) -> BTreeMap<String, usize> {
+    let lookback_start = start_frame.saturating_sub(60);
+    let mut counts = BTreeMap::new();
+    for event in events {
+        if event.kind != "asset_queue_write" {
+            continue;
+        }
+        let Some(frame) = event.frame else {
+            continue;
+        };
+        if frame < lookback_start || frame > end_frame {
+            continue;
+        }
+        if let Some(name) = event
+            .label
+            .clone()
+            .or_else(|| event.subroutine.clone())
+            .or_else(|| event.nearest_label.clone())
+            .or_else(|| event.pc_snes.clone())
+        {
+            *counts.entry(name).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn find_staging_writer_counts(
@@ -685,6 +731,7 @@ enum RegisterClass {
     Oam,
     ApuIo,
     WramStage,
+    QueueWrite,
     OtherPpu,
 }
 
@@ -730,6 +777,9 @@ fn classify_runtime_event(kind: &str, address: Option<u32>) -> RegisterClass {
     if matches!(kind, "wram_stage_write") {
         return RegisterClass::WramStage;
     }
+    if matches!(kind, "asset_queue_write") {
+        return RegisterClass::QueueWrite;
+    }
     address
         .map(classify_runtime_register)
         .unwrap_or(RegisterClass::None)
@@ -750,6 +800,7 @@ fn is_register_write_kind(kind: &str) -> bool {
             | "oam_reg"
             | "apu_io_reg"
             | "wram_stage_write"
+            | "asset_queue_write"
             | "register_write"
     )
 }
@@ -902,7 +953,7 @@ pub fn format_runtime_summary(result: &RuntimeCorrelationResult) -> String {
         out.push_str("\n; Hot routines\n");
         for item in &result.report.top_routines {
             out.push_str(&format!(
-                "; {}: total={} dma={} vram={} cgram={} oam={} sound={} wram_stage={} ppu_other={} reg_writes={} frames={:?}\n",
+                "; {}: total={} dma={} vram={} cgram={} oam={} sound={} wram_stage={} queue_write={} ppu_other={} reg_writes={} frames={:?}\n",
                 item.name,
                 item.total_events,
                 item.dma_events,
@@ -911,6 +962,7 @@ pub fn format_runtime_summary(result: &RuntimeCorrelationResult) -> String {
                 item.oam_events,
                 item.sound_events,
                 item.wram_stage_events,
+                item.queue_write_events,
                 item.other_ppu_events,
                 item.register_writes,
                 item.frames
@@ -921,7 +973,7 @@ pub fn format_runtime_summary(result: &RuntimeCorrelationResult) -> String {
         out.push_str("\n; Transfer episodes\n");
         for item in &result.report.top_episodes {
             out.push_str(&format!(
-                "; frames={}..{} total={} dma={} vram={} cgram={} oam={} sound={} primary={} producer={} staging_writer={} targets={:?} staging={:?} regs={:?}\n",
+                "; frames={}..{} total={} dma={} vram={} cgram={} oam={} sound={} primary={} producer={} queue_writer={} staging_writer={} targets={:?} staging={:?} regs={:?}\n",
                 item.start_frame,
                 item.end_frame,
                 item.total_events,
@@ -932,6 +984,7 @@ pub fn format_runtime_summary(result: &RuntimeCorrelationResult) -> String {
                 item.sound_events,
                 item.primary_routine.as_deref().unwrap_or("n/a"),
                 item.producer_candidate.as_deref().unwrap_or("n/a"),
+                item.queue_writer_candidate.as_deref().unwrap_or("n/a"),
                 item.staging_writer_candidate.as_deref().unwrap_or("n/a"),
                 item.replacement_targets,
                 item.staging_buffers,
@@ -944,6 +997,15 @@ pub fn format_runtime_summary(result: &RuntimeCorrelationResult) -> String {
                 out.push_str(&format!(
                     ";   staging_writers={:?}\n",
                     item.staging_writer_labels
+                        .iter()
+                        .map(|writer| format!("{}:{}", writer.name, writer.count))
+                        .collect::<Vec<_>>()
+                ));
+            }
+            if !item.queue_writer_labels.is_empty() {
+                out.push_str(&format!(
+                    ";   queue_writers={:?}\n",
+                    item.queue_writer_labels
                         .iter()
                         .map(|writer| format!("{}:{}", writer.name, writer.count))
                         .collect::<Vec<_>>()
@@ -1123,6 +1185,7 @@ mod tests {
         assert_eq!(result.report.top_routines[0].vram_events, 1);
         assert_eq!(result.report.top_routines[0].sound_events, 0);
         assert_eq!(result.report.top_routines[0].wram_stage_events, 0);
+        assert_eq!(result.report.top_routines[0].queue_write_events, 0);
         assert_eq!(result.events[0].mask.as_deref(), Some("0x01"));
     }
 
@@ -1143,6 +1206,7 @@ mod tests {
         assert_eq!(routine.oam_events, 1);
         assert_eq!(routine.sound_events, 0);
         assert_eq!(routine.wram_stage_events, 0);
+        assert_eq!(routine.queue_write_events, 0);
         assert_eq!(routine.register_writes, 3);
         assert_eq!(routine.frames, vec![7, 8]);
     }
@@ -1208,6 +1272,7 @@ mod tests {
         assert_eq!(first.total_events, 3);
         assert_eq!(first.primary_routine.as_deref(), Some("nmi_entry"));
         assert_eq!(first.producer_candidate.as_deref(), Some("loc_80_8012"));
+        assert_eq!(first.queue_writer_candidate, None);
         assert_eq!(first.staging_writer_candidate, None);
         assert!(first.replacement_targets.is_empty());
         assert!(first.staging_buffers.is_empty());
@@ -1248,5 +1313,30 @@ mod tests {
             .find(|routine| routine.name == "loc_80_8012")
             .expect("helper routine present");
         assert_eq!(helper.wram_stage_events, 1);
+    }
+
+    #[test]
+    fn attributes_queue_writers_to_transfer_episodes() {
+        let labels = BTreeMap::from([
+            (0x10usize, "nmi_entry".to_string()),
+            (0x12usize, "sub_80_8012".to_string()),
+        ]);
+        let lines = vec![
+            r#"{"source":"mesen2_lua","event":"queue_write","kind":"asset_queue_write","region":"asset_queue","frame":9,"scanline":20,"pc":"0x808012","address":"0x0442","value":85}"#.to_string(),
+            r#"{"source":"mesen2_lua","event":"dma_channel","kind":"dma_channel","launch_kind":"DMA","frame":10,"scanline":22,"pc":"0x808010","channel":0,"src":"$7F:8000","bbus":"$18","size":"$1000","ctrl":"$01"}"#.to_string(),
+            r#"{"source":"mesen2_lua","kind":"vram_reg","frame":10,"scanline":23,"pc":"0x808010","address":"0x2118","value":2}"#.to_string(),
+        ];
+
+        let result = correlate_runtime_lines(&labels, &cfg_fixture(), &lines).unwrap();
+        let episode = &result.report.top_episodes[0];
+        assert_eq!(episode.queue_writer_candidate.as_deref(), Some("sub_80_8012"));
+        assert_eq!(episode.queue_writer_labels[0].name, "sub_80_8012");
+        let helper = result
+            .report
+            .top_routines
+            .iter()
+            .find(|routine| routine.name == "sub_80_8012")
+            .expect("queue writer routine present");
+        assert_eq!(helper.queue_write_events, 1);
     }
 }
