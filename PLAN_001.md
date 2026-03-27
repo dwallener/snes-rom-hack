@@ -2,6 +2,8 @@
 
 This document captures the next implementation steps after the first-pass static LoROM 65816 disassembler and code mapper.
 
+Dynamic emulator-driven work has moved into `PLAN_002.md`. This plan stays focused on static recovery quality.
+
 ## Current Status
 
 The project can now:

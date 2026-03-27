@@ -1,4 +1,10 @@
+pub mod annotate;
+pub mod asset_paths;
+pub mod capture;
 pub mod cli;
 pub mod disasm65816;
+pub mod evidence;
 pub mod mapper;
 pub mod rommap;
+pub mod runtime;
+pub mod usage;

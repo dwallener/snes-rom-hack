@@ -1,6 +1,6 @@
 use crate::mapper::{CpuAddress, format_pc, pc_to_lorom, snes_to_lorom};
 use crate::rommap::{RomInfo, vector_targets};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
@@ -17,6 +17,7 @@ impl DecodeState {
             m_flag: Some(true),
             x_flag: Some(true),
         }
+        .normalized()
     }
 
     fn accumulator_is_8bit(&self) -> Option<bool> {
@@ -33,6 +34,23 @@ impl DecodeState {
         } else {
             self.x_flag
         }
+    }
+
+    fn normalized(mut self) -> Self {
+        if self.emulation == Some(true) {
+            self.m_flag = Some(true);
+            self.x_flag = Some(true);
+        }
+        self
+    }
+
+    fn merge(&self, other: &Self) -> Self {
+        DecodeState {
+            emulation: merge_flag(self.emulation, other.emulation),
+            m_flag: merge_flag(self.m_flag, other.m_flag),
+            x_flag: merge_flag(self.x_flag, other.x_flag),
+        }
+        .normalized()
     }
 }
 
@@ -64,14 +82,14 @@ pub struct Instruction {
     pub notes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CfgEdge {
     pub from_pc: usize,
     pub to_pc: Option<usize>,
     pub edge_type: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BasicBlock {
     pub start_pc: usize,
     pub end_pc: usize,
@@ -80,6 +98,7 @@ pub struct BasicBlock {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct JumpTableCandidate {
+    pub source_pc: usize,
     pub table_pc: usize,
     pub table_addr: CpuAddress,
     pub entry_width: usize,
@@ -115,6 +134,25 @@ pub struct DisassemblyResult {
     pub warnings: Vec<String>,
     pub classification: Vec<String>,
     pub unresolved_transfers: Vec<String>,
+}
+
+#[derive(Clone)]
+struct TraversalContext {
+    instructions: BTreeMap<usize, Instruction>,
+    labels: BTreeMap<usize, String>,
+    cfg_edges: Vec<CfgEdge>,
+    warnings: Vec<String>,
+    state_at_pc: HashMap<usize, DecodeState>,
+}
+
+#[derive(Clone)]
+struct IndirectAnalysis {
+    source_pc: usize,
+    source_mnemonic: String,
+    targets: Vec<usize>,
+    jump_table: Option<JumpTableCandidate>,
+    unresolved_reason: Option<String>,
+    state_for_targets: DecodeState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -485,22 +523,24 @@ const OPCODES: [OpcodeMeta; 256] = [
 ];
 
 pub fn analyze_rom(info: &RomInfo, rom: &[u8]) -> DisassemblyResult {
-    let mut instructions = BTreeMap::new();
-    let mut labels = BTreeMap::new();
-    let mut cfg_edges = Vec::new();
-    let mut warnings = info.warnings.clone();
-    let mut unresolved_transfers = Vec::new();
+    let mut context = TraversalContext {
+        instructions: BTreeMap::new(),
+        labels: BTreeMap::new(),
+        cfg_edges: Vec::new(),
+        warnings: info.warnings.clone(),
+        state_at_pc: HashMap::new(),
+    };
     let mut queue = VecDeque::new();
     let mut seen_entry = BTreeSet::new();
 
     for (label, _, pc_opt, addr) in vector_targets(info) {
         if let Some(pc) = pc_opt {
-            labels.entry(pc).or_insert(label);
+            context.labels.entry(pc).or_insert(label);
             if seen_entry.insert(pc) {
                 queue.push_back((pc, DecodeState::reset_state()));
             }
         } else {
-            warnings.push(format!(
+            context.warnings.push(format!(
                 "vector target {} at {} does not map into ROM",
                 label,
                 addr.format_snes()
@@ -508,121 +548,93 @@ pub fn analyze_rom(info: &RomInfo, rom: &[u8]) -> DisassemblyResult {
         }
     }
 
-    let mut state_at_pc: HashMap<usize, DecodeState> = HashMap::new();
+    traverse_worklist(rom, &mut context, &mut queue);
 
-    while let Some((start_pc, state)) = queue.pop_front() {
-        let mut pc = start_pc;
-        let mut state_here = state.clone();
-        loop {
-            if pc >= rom.len() {
-                warnings.push(format!("decode reached out-of-ROM pc {}", format_pc(pc)));
-                break;
-            }
-            if let Some(previous) = state_at_pc.get(&pc) {
-                if previous == &state_here || instructions.contains_key(&pc) {
-                    break;
-                }
-                warnings.push(format!(
-                    "state collision at {} between {:?} and {:?}",
-                    format_pc(pc),
-                    previous,
-                    state_here
-                ));
-                break;
-            }
-
-            let decoded = decode_instruction(rom, pc, &state_here);
-            let flow = decoded.flow_type;
-            state_at_pc.insert(pc, state_here.clone());
-
-            if let Some(target) = decoded.target_pc {
-                match flow {
-                    FlowType::Branch => {
-                        cfg_edges.push(CfgEdge {
-                            from_pc: pc,
-                            to_pc: Some(target),
-                            edge_type: if decoded.mnemonic == "bra" || decoded.mnemonic == "brl" {
-                                "jump".to_string()
-                            } else {
-                                "branch_taken".to_string()
-                            },
-                        });
-                        if !labels.contains_key(&target) {
-                            labels.insert(
-                                target,
-                                format!(
-                                    "loc_{:02X}_{:04X}",
-                                    pc_to_lorom(target).bank,
-                                    pc_to_lorom(target).addr
-                                ),
-                            );
-                        }
-                        queue.push_back((target, state_here.clone()));
-                    }
-                    FlowType::Call => {
-                        cfg_edges.push(CfgEdge {
-                            from_pc: pc,
-                            to_pc: Some(target),
-                            edge_type: "call".to_string(),
-                        });
-                        labels.entry(target).or_insert_with(|| {
-                            let addr = pc_to_lorom(target);
-                            format!("sub_{:02X}_{:04X}", addr.bank, addr.addr)
-                        });
-                        queue.push_back((target, state_here.clone()));
-                    }
-                    FlowType::Jump => {
-                        cfg_edges.push(CfgEdge {
-                            from_pc: pc,
-                            to_pc: Some(target),
-                            edge_type: "jump".to_string(),
-                        });
-                        labels.entry(target).or_insert_with(|| {
-                            let addr = pc_to_lorom(target);
-                            format!("loc_{:02X}_{:04X}", addr.bank, addr.addr)
-                        });
-                        queue.push_back((target, state_here.clone()));
-                    }
-                    _ => {}
-                }
-            }
-
-            if decoded.target_pc.is_none()
-                && matches!(decoded.mnemonic.as_str(), "jmp" | "jsr")
-                && decoded.operand.contains('(')
-            {
-                cfg_edges.push(CfgEdge {
-                    from_pc: pc,
-                    to_pc: None,
-                    edge_type: "unresolved_indirect".to_string(),
-                });
-                unresolved_transfers.push(format!(
-                    "{} {} unresolved indirect transfer",
-                    pc_to_lorom(pc).format_snes(),
-                    decoded.mnemonic
-                ));
-            }
-
-            if let Some(fallthrough) = decoded.fallthrough_pc {
-                if flow == FlowType::Branch {
-                    cfg_edges.push(CfgEdge {
-                        from_pc: pc,
-                        to_pc: Some(fallthrough),
-                        edge_type: "fallthrough".to_string(),
+    let mut jump_tables = Vec::new();
+    loop {
+        let analyses = analyze_indirect_transfers(&context.instructions, rom, info.size);
+        let mut seeded_any = false;
+        for analysis in analyses {
+            if let Some(candidate) = analysis.jump_table.clone() {
+                if !jump_tables
+                    .iter()
+                    .any(|existing: &JumpTableCandidate| existing.source_pc == candidate.source_pc)
+                {
+                    context.labels.entry(candidate.table_pc).or_insert_with(|| {
+                        let table_addr = pc_to_lorom(candidate.table_pc);
+                        format!("jtbl_{:02X}_{:04X}", table_addr.bank, table_addr.addr)
                     });
+                    jump_tables.push(candidate);
                 }
-                state_here = decoded.state_out.clone().unwrap_or(state_here);
-                instructions.insert(pc, decoded);
-                pc = fallthrough;
-                continue;
             }
-
-            instructions.insert(pc, decoded);
+            if !analysis.targets.is_empty() {
+                let label_kind = if analysis.source_mnemonic == "jsr" {
+                    LabelKind::Subroutine
+                } else {
+                    LabelKind::Location
+                };
+                for target in analysis.targets {
+                    let seeded = seed_discovered_target(
+                        &mut context,
+                        &mut queue,
+                        target,
+                        label_kind,
+                        &analysis.state_for_targets,
+                    );
+                    seeded_any |= seeded;
+                }
+            }
+        }
+        if !seeded_any {
             break;
+        }
+        traverse_worklist(rom, &mut context, &mut queue);
+    }
+
+    let mut unresolved_transfers = Vec::new();
+    for analysis in analyze_indirect_transfers(&context.instructions, rom, info.size) {
+        if !analysis.targets.is_empty() {
+            let edge_type = if analysis.source_mnemonic == "jsr" {
+                "call"
+            } else {
+                "jump"
+            };
+            let label_kind = if analysis.source_mnemonic == "jsr" {
+                LabelKind::Subroutine
+            } else {
+                LabelKind::Location
+            };
+            for target in analysis.targets {
+                context.cfg_edges.push(CfgEdge {
+                    from_pc: analysis.source_pc,
+                    to_pc: Some(target),
+                    edge_type: edge_type.to_string(),
+                });
+                context.labels.entry(target).or_insert_with(|| {
+                    let addr = pc_to_lorom(target);
+                    match label_kind {
+                        LabelKind::Location => format!("loc_{:02X}_{:04X}", addr.bank, addr.addr),
+                        LabelKind::Subroutine => format!("sub_{:02X}_{:04X}", addr.bank, addr.addr),
+                    }
+                });
+            }
+        } else {
+            context.cfg_edges.push(CfgEdge {
+                from_pc: analysis.source_pc,
+                to_pc: None,
+                edge_type: "unresolved_indirect".to_string(),
+            });
+            unresolved_transfers.push(format!(
+                "{} {} {}",
+                pc_to_lorom(analysis.source_pc).format_snes(),
+                analysis.source_mnemonic,
+                analysis
+                    .unresolved_reason
+                    .unwrap_or_else(|| "unresolved indirect transfer".to_string())
+            ));
         }
     }
 
-    let jump_tables = detect_jump_tables(&instructions, rom, info.size, &mut labels);
     let mut classification = vec!["unknown".to_string(); info.size];
     for index in crate::rommap::header_region(info) {
         classification[index] = "header".to_string();
@@ -630,7 +642,7 @@ pub fn analyze_rom(info: &RomInfo, rom: &[u8]) -> DisassemblyResult {
     for index in crate::rommap::vector_region(info) {
         classification[index] = "vector".to_string();
     }
-    for instruction in instructions.values() {
+    for instruction in context.instructions.values() {
         for index in
             instruction.pc_offset..(instruction.pc_offset + instruction.length).min(info.size)
         {
@@ -642,14 +654,20 @@ pub fn analyze_rom(info: &RomInfo, rom: &[u8]) -> DisassemblyResult {
             ..(candidate.table_pc + candidate.targets.len() * candidate.entry_width).min(info.size)
         {
             if classification[index] == "unknown" {
-                classification[index] = "data".to_string();
+                classification[index] = "jump_table".to_string();
             }
+        }
+    }
+    for reference_pc in collect_rom_data_references(&context.instructions, info.size) {
+        if classification[reference_pc] == "unknown" {
+            classification[reference_pc] = "referenced_data".to_string();
         }
     }
 
     let data_regions = collect_data_regions(&classification);
-    let blocks = build_basic_blocks(&instructions, &cfg_edges);
-    let subroutines = labels
+    let blocks = build_basic_blocks(&context.instructions, &context.cfg_edges);
+    let subroutines = context
+        .labels
         .values()
         .filter(|name| name.starts_with("sub_"))
         .count();
@@ -661,17 +679,18 @@ pub fn analyze_rom(info: &RomInfo, rom: &[u8]) -> DisassemblyResult {
         .iter()
         .filter(|item| item.as_str() == "unknown")
         .count();
-    let unresolved_indirect_jumps = cfg_edges
+    let unresolved_indirect_jumps = context
+        .cfg_edges
         .iter()
         .filter(|edge| edge.edge_type == "unresolved_indirect")
         .count();
 
     let basic_blocks_count = blocks.len();
     DisassemblyResult {
-        instructions,
+        instructions: context.instructions,
         blocks,
-        cfg_edges,
-        labels,
+        cfg_edges: context.cfg_edges,
+        labels: context.labels,
         jump_tables,
         data_regions,
         counts: AnalysisCounts {
@@ -681,9 +700,194 @@ pub fn analyze_rom(info: &RomInfo, rom: &[u8]) -> DisassemblyResult {
             subroutines,
             unresolved_indirect_jumps,
         },
-        warnings,
+        warnings: context.warnings,
         classification,
         unresolved_transfers,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LabelKind {
+    Location,
+    Subroutine,
+}
+
+fn traverse_worklist(
+    rom: &[u8],
+    context: &mut TraversalContext,
+    queue: &mut VecDeque<(usize, DecodeState)>,
+) {
+    while let Some((start_pc, state)) = queue.pop_front() {
+        let mut pc = start_pc;
+        let mut state_here = state.clone();
+        loop {
+            if pc >= rom.len() {
+                context
+                    .warnings
+                    .push(format!("decode reached out-of-ROM pc {}", format_pc(pc)));
+                break;
+            }
+            if let Some(previous) = context.state_at_pc.get(&pc) {
+                let merged = previous.merge(&state_here);
+                if &merged == previous {
+                    break;
+                }
+                context.warnings.push(format!(
+                    "state merge at {} from {:?} and {:?} -> {:?}",
+                    format_pc(pc),
+                    previous,
+                    state_here,
+                    merged
+                ));
+                context.state_at_pc.insert(pc, merged.clone());
+                queue.push_back((pc, merged));
+                break;
+            }
+
+            let decoded = decode_instruction(rom, pc, &state_here);
+            let flow = decoded.flow_type;
+            context.state_at_pc.insert(pc, state_here.clone());
+
+            if let Some(target) = decoded.target_pc {
+                match flow {
+                    FlowType::Branch => {
+                        let edge_type = if decoded.mnemonic == "bra" || decoded.mnemonic == "brl" {
+                            "jump"
+                        } else {
+                            "branch_taken"
+                        };
+                        let _ = record_flow_target(
+                            context,
+                            queue,
+                            pc,
+                            target,
+                            edge_type,
+                            LabelKind::Location,
+                            &state_here,
+                        );
+                    }
+                    FlowType::Call => {
+                        let _ = record_flow_target(
+                            context,
+                            queue,
+                            pc,
+                            target,
+                            "call",
+                            LabelKind::Subroutine,
+                            &state_here,
+                        );
+                    }
+                    FlowType::Jump => {
+                        let _ = record_flow_target(
+                            context,
+                            queue,
+                            pc,
+                            target,
+                            "jump",
+                            LabelKind::Location,
+                            &state_here,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(fallthrough) = decoded.fallthrough_pc {
+                if flow == FlowType::Branch {
+                    context.cfg_edges.push(CfgEdge {
+                        from_pc: pc,
+                        to_pc: Some(fallthrough),
+                        edge_type: "fallthrough".to_string(),
+                    });
+                }
+                state_here = decoded.state_out.clone().unwrap_or(state_here);
+                context.instructions.insert(pc, decoded);
+                pc = fallthrough;
+                continue;
+            }
+
+            context.instructions.insert(pc, decoded);
+            break;
+        }
+    }
+}
+
+fn record_flow_target(
+    context: &mut TraversalContext,
+    queue: &mut VecDeque<(usize, DecodeState)>,
+    source_pc: usize,
+    target: usize,
+    edge_type: &str,
+    label_kind: LabelKind,
+    state: &DecodeState,
+) -> bool {
+    context.cfg_edges.push(CfgEdge {
+        from_pc: source_pc,
+        to_pc: Some(target),
+        edge_type: edge_type.to_string(),
+    });
+    context.labels.entry(target).or_insert_with(|| {
+        let addr = pc_to_lorom(target);
+        match label_kind {
+            LabelKind::Location => format!("loc_{:02X}_{:04X}", addr.bank, addr.addr),
+            LabelKind::Subroutine => format!("sub_{:02X}_{:04X}", addr.bank, addr.addr),
+        }
+    });
+    seed_or_merge_target(context, queue, target, state)
+}
+
+fn seed_discovered_target(
+    context: &mut TraversalContext,
+    queue: &mut VecDeque<(usize, DecodeState)>,
+    target: usize,
+    label_kind: LabelKind,
+    state: &DecodeState,
+) -> bool {
+    context.labels.entry(target).or_insert_with(|| {
+        let addr = pc_to_lorom(target);
+        match label_kind {
+            LabelKind::Location => format!("loc_{:02X}_{:04X}", addr.bank, addr.addr),
+            LabelKind::Subroutine => format!("sub_{:02X}_{:04X}", addr.bank, addr.addr),
+        }
+    });
+    seed_or_merge_target(context, queue, target, state)
+}
+
+fn seed_or_merge_target(
+    context: &mut TraversalContext,
+    queue: &mut VecDeque<(usize, DecodeState)>,
+    target: usize,
+    state: &DecodeState,
+) -> bool {
+    if let Some(previous) = context.state_at_pc.get(&target) {
+        let merged = merge_states(previous, state);
+        if &merged == previous {
+            return false;
+        }
+        context.warnings.push(format!(
+            "state merge at {} from {:?} and {:?} -> {:?}",
+            format_pc(target),
+            previous,
+            state,
+            merged
+        ));
+        context.state_at_pc.insert(target, merged.clone());
+        queue.push_back((target, merged));
+        return true;
+    }
+    queue.push_back((target, state.clone()));
+    true
+}
+
+fn merge_states(existing: &DecodeState, incoming: &DecodeState) -> DecodeState {
+    existing.merge(incoming)
+}
+
+fn merge_flag(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+    match (left, right) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        (Some(_), Some(_)) => None,
+        (None, _) | (_, None) => None,
     }
 }
 
@@ -715,6 +919,7 @@ pub fn decode_instruction(rom: &[u8], pc: usize, state: &DecodeState) -> Instruc
             next.emulation = None;
             next.m_flag = None;
             next.x_flag = None;
+            *next = next.clone().normalized();
         }
         notes.push("XCE makes mode width ambiguous without carry tracking".to_string());
     }
@@ -968,6 +1173,7 @@ fn apply_rep_sep(state: &mut DecodeState, operand: u8, set: bool) {
         if operand & 0x20 != 0 {
             state.m_flag = Some(true);
         }
+        *state = state.clone().normalized();
         return;
     }
     if operand & 0x10 != 0 {
@@ -976,67 +1182,217 @@ fn apply_rep_sep(state: &mut DecodeState, operand: u8, set: bool) {
     if operand & 0x20 != 0 {
         state.m_flag = Some(set);
     }
+    *state = state.clone().normalized();
 }
 
-fn detect_jump_tables(
+fn analyze_indirect_transfers(
     instructions: &BTreeMap<usize, Instruction>,
     rom: &[u8],
     rom_size: usize,
-    labels: &mut BTreeMap<usize, String>,
-) -> Vec<JumpTableCandidate> {
-    let pcs = instructions.keys().copied().collect::<Vec<_>>();
+) -> Vec<IndirectAnalysis> {
     let mut result = Vec::new();
-    for window in pcs.windows(3) {
-        let [pc0, pc1, pc2] = [window[0], window[1], window[2]];
-        let i0 = &instructions[&pc0];
-        let i1 = &instructions[&pc1];
-        let i2 = &instructions[&pc2];
-        let indexed_indirect_jump = i2.mnemonic == "jmp" && i2.operand.ends_with(",x)");
-        let index_setup = (i0.mnemonic == "asl" && i0.operand == "a") && i1.mnemonic == "tax";
-        if !(indexed_indirect_jump && index_setup) {
+    let ordered = instructions.keys().copied().collect::<Vec<_>>();
+    for (index, pc) in ordered.iter().copied().enumerate() {
+        let instruction = &instructions[&pc];
+        let is_indirect = matches!(instruction.mnemonic.as_str(), "jmp" | "jsr")
+            && (instruction.operand.contains('(') || instruction.operand.contains('['));
+        if !is_indirect {
             continue;
         }
-        let base = parse_absolute_operand(&i2.operand).unwrap_or(0);
-        let bank = i2.snes_bank;
-        let Some(table_pc) = snes_to_lorom(bank, base, rom_size) else {
-            continue;
+
+        let state_for_targets = instruction
+            .state_out
+            .clone()
+            .unwrap_or_else(|| instruction.state_in.clone());
+        let mut analysis = IndirectAnalysis {
+            source_pc: pc,
+            source_mnemonic: instruction.mnemonic.clone(),
+            targets: Vec::new(),
+            jump_table: None,
+            unresolved_reason: Some("unresolved indirect transfer".to_string()),
+            state_for_targets,
         };
-        let mut targets = Vec::new();
-        for slot in 0..16usize {
-            let entry_pc = table_pc + slot * 2;
-            if entry_pc + 1 >= rom.len() {
-                break;
+
+        if let Some(base) = parse_absolute_operand(&instruction.operand) {
+            if instruction.operand.starts_with("($") && instruction.operand.ends_with(",x)") {
+                if let Some(candidate) = detect_indexed_jump_table(
+                    &ordered,
+                    index,
+                    instructions,
+                    rom,
+                    rom_size,
+                    pc,
+                    base,
+                ) {
+                    analysis.targets = candidate.targets.clone();
+                    analysis.jump_table = Some(candidate);
+                    analysis.unresolved_reason = None;
+                }
+            } else if instruction.operand.starts_with("($") && instruction.operand.ends_with(')') {
+                if let Some(target) =
+                    resolve_indirect_pointer_same_bank(instruction.snes_bank, base, rom, rom_size)
+                {
+                    analysis.targets.push(target);
+                    analysis.unresolved_reason = None;
+                }
+            } else if instruction.operand.starts_with("[$") && instruction.operand.ends_with(']') {
+                if let Some(target) = resolve_indirect_pointer_long(base, rom, rom_size) {
+                    analysis.targets.push(target);
+                    analysis.unresolved_reason = None;
+                }
             }
-            let addr = u16::from_le_bytes([rom[entry_pc], rom[entry_pc + 1]]);
-            let Some(target) = snes_to_lorom(bank, addr, rom_size) else {
-                break;
-            };
-            if addr < 0x8000 {
-                break;
-            }
-            targets.push(target);
-            labels.entry(table_pc).or_insert_with(|| {
-                let table_addr = pc_to_lorom(table_pc);
-                format!("jtbl_{:02X}_{:04X}", table_addr.bank, table_addr.addr)
-            });
         }
-        if targets.len() >= 2 {
-            result.push(JumpTableCandidate {
-                table_pc,
-                table_addr: pc_to_lorom(table_pc),
-                entry_width: 2,
-                confidence: if targets.len() >= 4 { "medium" } else { "low" }.to_string(),
-                targets,
-            });
-        }
+
+        result.push(analysis);
     }
     result
+}
+
+fn detect_indexed_jump_table(
+    ordered: &[usize],
+    index: usize,
+    instructions: &BTreeMap<usize, Instruction>,
+    rom: &[u8],
+    rom_size: usize,
+    source_pc: usize,
+    base: u16,
+) -> Option<JumpTableCandidate> {
+    let source = &instructions[&source_pc];
+    let bank = source.snes_bank;
+    let table_pc = snes_to_lorom(bank, base, rom_size)?;
+    if !has_index_dispatch_setup(ordered, index, instructions) {
+        return None;
+    }
+
+    let mut targets = Vec::new();
+    for slot in 0..16usize {
+        let entry_pc = table_pc + slot * 2;
+        if entry_pc + 1 >= rom.len() {
+            break;
+        }
+        let addr = u16::from_le_bytes([rom[entry_pc], rom[entry_pc + 1]]);
+        if addr < 0x8000 {
+            break;
+        }
+        let Some(target) = snes_to_lorom(bank, addr, rom_size) else {
+            break;
+        };
+        if !looks_like_code_start(rom, target) {
+            break;
+        }
+        targets.push(target);
+    }
+
+    if targets.len() < 2 {
+        return None;
+    }
+
+    Some(JumpTableCandidate {
+        source_pc,
+        table_pc,
+        table_addr: pc_to_lorom(table_pc),
+        entry_width: 2,
+        confidence: if targets.len() >= 4 { "medium" } else { "low" }.to_string(),
+        targets,
+    })
+}
+
+fn has_index_dispatch_setup(
+    ordered: &[usize],
+    index: usize,
+    instructions: &BTreeMap<usize, Instruction>,
+) -> bool {
+    if index == 0 {
+        return false;
+    }
+    let prev = &instructions[&ordered[index - 1]];
+    if prev.mnemonic == "tax" {
+        return true;
+    }
+    if index >= 2 {
+        let prev2 = &instructions[&ordered[index - 2]];
+        return prev.mnemonic == "tax" && prev2.mnemonic == "asl" && prev2.operand == "a";
+    }
+    false
+}
+
+fn resolve_indirect_pointer_same_bank(
+    bank: u8,
+    base: u16,
+    rom: &[u8],
+    rom_size: usize,
+) -> Option<usize> {
+    let pointer_pc = snes_to_lorom(bank, base, rom_size)?;
+    if pointer_pc + 1 >= rom.len() {
+        return None;
+    }
+    let addr = u16::from_le_bytes([rom[pointer_pc], rom[pointer_pc + 1]]);
+    let target = snes_to_lorom(bank, addr, rom_size)?;
+    looks_like_code_start(rom, target).then_some(target)
+}
+
+fn resolve_indirect_pointer_long(base: u16, rom: &[u8], rom_size: usize) -> Option<usize> {
+    let pointer_pc = snes_to_lorom(0x80, base, rom_size)?;
+    if pointer_pc + 2 >= rom.len() {
+        return None;
+    }
+    let bank = rom[pointer_pc + 2];
+    let addr = u16::from_le_bytes([rom[pointer_pc], rom[pointer_pc + 1]]);
+    let target = snes_to_lorom(bank, addr, rom_size)?;
+    looks_like_code_start(rom, target).then_some(target)
+}
+
+fn looks_like_code_start(rom: &[u8], pc: usize) -> bool {
+    rom.get(pc)
+        .is_some_and(|opcode| !matches!(*opcode, 0x00 | 0x02 | 0x42 | 0xDB | 0xFF))
+}
+
+fn collect_rom_data_references(
+    instructions: &BTreeMap<usize, Instruction>,
+    rom_size: usize,
+) -> BTreeSet<usize> {
+    let mut refs = BTreeSet::new();
+    for instruction in instructions.values() {
+        let Some(opcode) = instruction.bytes_.first().copied() else {
+            continue;
+        };
+        let operand = &instruction.bytes_[1..];
+        let meta = OPCODES[opcode as usize];
+        match meta.mode {
+            AddressingMode::Absolute
+            | AddressingMode::AbsoluteX
+            | AddressingMode::AbsoluteY
+            | AddressingMode::AbsoluteIndirect
+            | AddressingMode::AbsoluteIndexedIndirect
+            | AddressingMode::AbsoluteIndirectLong => {
+                if operand.len() >= 2 {
+                    let addr = u16::from_le_bytes([operand[0], operand[1]]);
+                    if let Some(pc) = snes_to_lorom(instruction.snes_bank, addr, rom_size) {
+                        refs.insert(pc);
+                    }
+                }
+            }
+            AddressingMode::AbsoluteLong | AddressingMode::AbsoluteLongX => {
+                if operand.len() >= 3 {
+                    let bank = operand[2];
+                    let addr = u16::from_le_bytes([operand[0], operand[1]]);
+                    if let Some(pc) = snes_to_lorom(bank, addr, rom_size) {
+                        refs.insert(pc);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    refs
 }
 
 fn parse_absolute_operand(text: &str) -> Option<u16> {
     let cleaned = text
         .trim_start_matches('(')
+        .trim_start_matches('[')
         .trim_end_matches(",x)")
+        .trim_end_matches(']')
         .trim_end_matches(')');
     cleaned
         .strip_prefix('$')
@@ -1101,34 +1457,52 @@ fn build_basic_blocks(
 fn collect_data_regions(classification: &[String]) -> Vec<DataRegion> {
     let mut out = Vec::new();
     let mut start = None;
-    let mut current_reason = "";
+    let mut current_reason = String::new();
     for (index, kind) in classification.iter().enumerate() {
-        let is_data = kind == "data" || (kind == "unknown");
+        let is_data = matches!(
+            kind.as_str(),
+            "jump_table" | "referenced_data" | "unknown"
+        );
         if is_data && start.is_none() {
             start = Some(index);
-            current_reason = if kind == "data" {
-                "jump_table_or_referenced_data"
-            } else {
-                "likely_data_or_unknown"
+            current_reason = match kind.as_str() {
+                "jump_table" => "jump_table".to_string(),
+                "referenced_data" => "referenced_data".to_string(),
+                _ => "likely_data_or_unknown".to_string(),
+            };
+        } else if is_data && start.is_some() && !current_reason.is_empty() && kind != &current_reason {
+            let begin = start.take().unwrap_or(0);
+            if current_reason != "likely_data_or_unknown" || index > begin + 8 {
+                out.push(DataRegion {
+                    start_pc: begin,
+                    end_pc: index - 1,
+                    reason: current_reason.clone(),
+                });
+            }
+            start = Some(index);
+            current_reason = match kind.as_str() {
+                "jump_table" => "jump_table".to_string(),
+                "referenced_data" => "referenced_data".to_string(),
+                _ => "likely_data_or_unknown".to_string(),
             };
         }
         if !is_data && start.is_some() {
             let begin = start.take().unwrap_or(0);
-            if index > begin + 8 {
+            if current_reason != "likely_data_or_unknown" || index > begin + 8 {
                 out.push(DataRegion {
                     start_pc: begin,
                     end_pc: index - 1,
-                    reason: current_reason.to_string(),
+                    reason: current_reason.clone(),
                 });
             }
         }
     }
     if let Some(begin) = start {
-        if classification.len() > begin + 8 {
+        if current_reason != "likely_data_or_unknown" || classification.len() > begin + 8 {
             out.push(DataRegion {
                 start_pc: begin,
                 end_pc: classification.len() - 1,
-                reason: current_reason.to_string(),
+                reason: current_reason.clone(),
             });
         }
     }
