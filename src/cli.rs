@@ -1,4 +1,4 @@
-use crate::disasm65816::{DisassemblyResult, analyze_rom};
+use crate::disasm65816::{DisassemblyResult, analyze_rom, analyze_rom_with_seeds};
 use crate::annotate::run_annotate_evidence_cli;
 use crate::asset_paths::run_asset_paths_cli;
 use crate::capture::run_collect_trace_cli;
@@ -6,7 +6,8 @@ use crate::mapper::pc_to_lorom;
 use crate::replacement::run_replacement_report_cli;
 use crate::rommap::{format_reset_summary, load_rom};
 use crate::runtime::{
-    correlate_runtime_lines, format_runtime_summary, load_labels_by_pc, load_runtime_cfg,
+    correlate_runtime_lines, extract_runtime_seed_pcs, format_runtime_summary, load_labels_by_pc,
+    load_runtime_cfg,
 };
 use crate::usage::run_usage_map_import_cli;
 use crate::evidence::run_evidence_report_cli;
@@ -40,7 +41,7 @@ pub fn run_disasm_cli(args: &[String]) -> io::Result<()> {
     if !matches!(args.first().map(String::as_str), Some("rom")) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "expected `disasm rom <path> --out <dir>`",
+            "expected `disasm rom <path> --out <dir> [--runtime-seeds <trace.jsonl>]`",
         ));
     }
 
@@ -49,12 +50,17 @@ pub fn run_disasm_cli(args: &[String]) -> io::Result<()> {
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing ROM path"))?;
     let mut out_dir = None::<PathBuf>;
+    let mut runtime_seed_path = None::<PathBuf>;
     let mut index = 2usize;
     while index < args.len() {
         match args[index].as_str() {
             "--out" => {
                 index += 1;
                 out_dir = args.get(index).map(PathBuf::from);
+            }
+            "--runtime-seeds" => {
+                index += 1;
+                runtime_seed_path = args.get(index).map(PathBuf::from);
             }
             other => {
                 return Err(io::Error::new(
@@ -71,7 +77,16 @@ pub fn run_disasm_cli(args: &[String]) -> io::Result<()> {
     fs::create_dir_all(&out_dir)?;
 
     let loaded = load_rom(&rom_path)?;
-    let disasm = analyze_rom(&loaded.info, &loaded.bytes);
+    let disasm = if let Some(seed_path) = runtime_seed_path {
+        let lines = fs::read_to_string(seed_path)?
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let seed_pcs = extract_runtime_seed_pcs(&lines)?;
+        analyze_rom_with_seeds(&loaded.info, &loaded.bytes, &seed_pcs)
+    } else {
+        analyze_rom(&loaded.info, &loaded.bytes)
+    };
 
     write_text(
         &out_dir.join("disasm.txt"),
@@ -267,6 +282,8 @@ pub fn run_phase2_cli(args: &[String]) -> io::Result<()> {
     run_disasm_cli(&[
         "rom".to_string(),
         rom_path.display().to_string(),
+        "--runtime-seeds".to_string(),
+        trace_path.display().to_string(),
         "--out".to_string(),
         out_dir.display().to_string(),
     ])?;

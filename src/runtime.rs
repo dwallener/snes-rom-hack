@@ -2,7 +2,7 @@ use crate::disasm65816::{BasicBlock, CfgEdge};
 use crate::mapper::{format_pc, pc_to_lorom, snes_to_lorom};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -998,6 +998,39 @@ pub fn load_runtime_cfg(text: &str) -> io::Result<RuntimeCfg> {
     serde_json::from_str(text).map_err(io::Error::other)
 }
 
+pub fn extract_runtime_seed_pcs(lines: &[String]) -> io::Result<Vec<usize>> {
+    let mut pcs = BTreeSet::new();
+    let non_empty_line_indexes = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (!line.trim().is_empty()).then_some(index))
+        .collect::<Vec<_>>();
+    let last_non_empty_line = non_empty_line_indexes.last().copied();
+
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = match parse_runtime_json_line(line) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                if Some(index) == last_non_empty_line && looks_like_truncated_json(line, &error) {
+                    continue;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("line {}: {error}", index + 1),
+                ));
+            }
+        };
+        if let Some(pc) = parsed.pc.and_then(snes24_to_lorom_pc) {
+            pcs.insert(pc);
+        }
+    }
+
+    Ok(pcs.into_iter().collect())
+}
+
 pub fn format_event_debug(event: &AnnotatedRuntimeEvent) -> String {
     let label = event
         .label
@@ -1178,6 +1211,17 @@ mod tests {
         assert_eq!(first.staging_writer_candidate, None);
         assert!(first.replacement_targets.is_empty());
         assert!(first.staging_buffers.is_empty());
+    }
+
+    #[test]
+    fn extracts_runtime_seed_pcs_from_trace_lines() {
+        let lines = vec![
+            r#"{"source":"mesen2_lua","kind":"wram_stage_write","frame":9,"pc":"0x808012","address":"$7F:8000","value":85}"#.to_string(),
+            r#"{"source":"mesen2_lua","kind":"dma_channel","frame":10,"pc":"0x808010","src":"$7F:8000","bbus":"$18","size":"$1000"}"#.to_string(),
+        ];
+
+        let pcs = extract_runtime_seed_pcs(&lines).unwrap();
+        assert_eq!(pcs, vec![0x10, 0x12]);
     }
 
     #[test]

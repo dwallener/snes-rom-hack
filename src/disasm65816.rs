@@ -523,6 +523,14 @@ const OPCODES: [OpcodeMeta; 256] = [
 ];
 
 pub fn analyze_rom(info: &RomInfo, rom: &[u8]) -> DisassemblyResult {
+    analyze_rom_with_seeds(info, rom, &[])
+}
+
+pub fn analyze_rom_with_seeds(
+    info: &RomInfo,
+    rom: &[u8],
+    runtime_seed_pcs: &[usize],
+) -> DisassemblyResult {
     let mut context = TraversalContext {
         instructions: BTreeMap::new(),
         labels: BTreeMap::new(),
@@ -546,6 +554,27 @@ pub fn analyze_rom(info: &RomInfo, rom: &[u8]) -> DisassemblyResult {
                 addr.format_snes()
             ));
         }
+    }
+
+    let mut seeded_runtime_count = 0usize;
+    for &pc in runtime_seed_pcs {
+        if pc >= info.size {
+            continue;
+        }
+        context.labels.entry(pc).or_insert_with(|| {
+            let addr = pc_to_lorom(pc);
+            format!("loc_{:02X}_{:04X}", addr.bank, addr.addr)
+        });
+        if seen_entry.insert(pc) {
+            queue.push_back((pc, DecodeState::reset_state()));
+            seeded_runtime_count += 1;
+        }
+    }
+    if seeded_runtime_count > 0 {
+        context.warnings.push(format!(
+            "seeded {} runtime-derived PCs into recursive traversal",
+            seeded_runtime_count
+        ));
     }
 
     traverse_worklist(rom, &mut context, &mut queue);

@@ -1,4 +1,4 @@
-use snes_rom_hack::disasm65816::{DecodeState, analyze_rom, decode_instruction};
+use snes_rom_hack::disasm65816::{DecodeState, analyze_rom, analyze_rom_with_seeds, decode_instruction};
 use snes_rom_hack::mapper::{lorom_vector_target_to_pc, pc_to_lorom, snes_to_lorom};
 use snes_rom_hack::rommap::{load_rom, strip_copier_header};
 use std::fs;
@@ -116,6 +116,12 @@ fn referenced_data_fixture() -> Vec<u8> {
         0xEA,
     ]);
     rom[0x0040..0x0044].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    rom
+}
+
+fn runtime_seed_fixture() -> Vec<u8> {
+    let mut rom = synthetic_lorom();
+    rom[0x0060..0x0063].copy_from_slice(&[0xEA, 0xEA, 0x60]);
     rom
 }
 
@@ -298,4 +304,22 @@ fn marks_referenced_rom_data() {
         .any(|region| region.start_pc <= 0x40
             && region.end_pc >= 0x40
             && region.reason == "referenced_data"));
+}
+
+#[test]
+fn runtime_seed_pcs_expand_static_coverage() {
+    let rom_path = write_fixture_rom(&runtime_seed_fixture());
+    let loaded = load_rom(&rom_path).unwrap();
+    fs::remove_file(&rom_path).unwrap();
+
+    let plain = analyze_rom(&loaded.info, &loaded.bytes);
+    assert!(!plain.instructions.contains_key(&0x60));
+
+    let seeded = analyze_rom_with_seeds(&loaded.info, &loaded.bytes, &[0x60]);
+    assert!(seeded.instructions.contains_key(&0x60));
+    assert!(seeded.labels.values().any(|label| label == "loc_80_8060"));
+    assert!(seeded
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("runtime-derived PCs")));
 }
