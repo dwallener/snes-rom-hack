@@ -223,4 +223,5 @@ This is scaffold-only for now:
 - sprite assets can now be procedurally generated as animated “breathing ball” previews for player/NPC validation
 - build output now includes composite title/gameplay scene preview PNGs generated from scene packets and asset bindings
 - `template simulate` now verifies player D-pad motion and simple NPC patrol movement through generated frame sequences
+- `template build` now emits an engine-side frame-loop contract and pseudo-assembly tied to the same scene packets and movement rules
 - no engine/runtime ROM generation exists yet

@@ -1,5 +1,6 @@
 mod assets;
 mod content;
+mod engine;
 mod runtime;
 mod sim;
 
@@ -12,6 +13,7 @@ use assets::{
     render_asset_summary, render_pack_summary, resolve_asset_references,
 };
 use content::{build_room_asset_table, load_compiled_content, render_content_summary};
+use engine::{build_engine_plan, render_engine_build_summary, render_engine_frame_logic};
 use runtime::{default_runtime_skeleton, render_engine_stub, render_runtime_summary};
 
 const REQUIRED_DIRS: &[&str] = &[
@@ -313,6 +315,7 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     )?;
     let scene_previews =
         generate_scene_previews(&out_dir.join("content/previews"), &content, &assets, &asset_resolution)?;
+    let engine_plan = build_engine_plan(&content, &asset_resolution, &scene_packets, &runtime)?;
     let plan = BuildPlan {
         project: &manifest.name,
         template: manifest.template,
@@ -323,6 +326,9 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
             "engine/runtime_stub.asm",
             "engine/runtime_layout.json",
             "engine/runtime_summary.txt",
+            "engine/frame_logic.asm",
+            "engine/engine_plan.json",
+            "engine/engine_summary.txt",
             "content/scene_manifest.json",
             "content/room_asset_table.json",
             "content/content_summary.txt",
@@ -364,6 +370,18 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("engine/runtime_stub.asm"),
         render_engine_stub(&runtime),
+    )?;
+    fs::write(
+        out_dir.join("engine/frame_logic.asm"),
+        render_engine_frame_logic(&engine_plan),
+    )?;
+    fs::write(
+        out_dir.join("engine/engine_plan.json"),
+        serde_json::to_vec_pretty(&engine_plan).map_err(to_io_error)?,
+    )?;
+    fs::write(
+        out_dir.join("engine/engine_summary.txt"),
+        render_engine_build_summary(&engine_plan),
     )?;
     fs::write(
         out_dir.join("content/scene_manifest.json"),

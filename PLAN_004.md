@@ -389,6 +389,7 @@ Current state:
 - sprite pages can now be procedurally generated into animated previewable assets, with player/NPC palette variants proving that the sprite pipeline can carry distinct in-game visuals
 - `template build` now emits composite scene previews, which gives us a build-time proof that scene packets plus asset bindings can produce distinct title and gameplay visuals
 - `template simulate` now verifies D-pad-driven player movement and simple NPC movement from the same compiled scene and asset inputs
+- `template build` now emits a generated engine frame-loop contract and pseudo-assembly, so runtime behavior is no longer implied only by previews and simulation
 
 ### Step 6. Add gameplay
 
