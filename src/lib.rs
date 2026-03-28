@@ -9,4 +9,5 @@ pub mod player_gfx;
 pub mod rommap;
 pub mod replacement;
 pub mod runtime;
+pub mod template;
 pub mod usage;

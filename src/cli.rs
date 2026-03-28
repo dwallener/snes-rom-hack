@@ -14,6 +14,7 @@ use crate::runtime::{
 };
 use crate::usage::run_usage_map_import_cli;
 use crate::evidence::run_evidence_report_cli;
+use crate::template::run_template_cli;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -373,6 +374,10 @@ pub fn run_patch_player_gfx_wrapper_cli(args: &[String]) -> io::Result<()> {
 
 pub fn run_match_player_gfx_sheet_wrapper_cli(args: &[String]) -> io::Result<()> {
     run_match_player_gfx_sheet_cli(args)
+}
+
+pub fn run_template_wrapper_cli(args: &[String]) -> io::Result<()> {
+    run_template_cli(args)
 }
 
 fn write_text(path: &Path, text: &str) -> io::Result<()> {

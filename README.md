@@ -174,3 +174,38 @@ Run:
 ```bash
 cargo test
 ```
+
+## Template Scaffold
+
+The first `PLAN_004` slice adds a generation-side `template` namespace.
+
+Initialize a new single-screen-action project:
+
+```bash
+cargo run -- template init --kind single-screen-action --out /tmp/template-demo
+```
+
+Validate the project layout:
+
+```bash
+cargo run -- template validate --project /tmp/template-demo
+```
+
+Preview the current asset tree:
+
+```bash
+cargo run -- template preview-assets --project /tmp/template-demo
+```
+
+Emit the current build scaffold:
+
+```bash
+cargo run -- template build --project /tmp/template-demo --out /tmp/template-demo-build
+```
+
+This is scaffold-only for now:
+
+- project manifest and folder conventions exist
+- validation exists
+- build-plan emission exists
+- no engine/runtime ROM generation exists yet
