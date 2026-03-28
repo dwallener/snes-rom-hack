@@ -387,6 +387,7 @@ Current state:
 - `template build` resolves scene and entity references into stable-id asset tables with VRAM-slot assignments
 - `template build` now also emits placeholder binary packs and per-scene load packets for runtime-side consumption
 - sprite pages can now be procedurally generated into animated previewable assets, with player/NPC palette variants proving that the sprite pipeline can carry distinct in-game visuals
+- `template build` now emits composite scene previews, which gives us a build-time proof that scene packets plus asset bindings can produce distinct title and gameplay visuals
 
 ### Step 6. Add gameplay
 

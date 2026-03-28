@@ -7,8 +7,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use assets::{
-    build_scene_load_packets, compile_placeholder_asset_packs, load_asset_bundle, render_asset_summary,
-    render_pack_summary, resolve_asset_references,
+    build_scene_load_packets, compile_placeholder_asset_packs, generate_scene_previews, load_asset_bundle,
+    render_asset_summary, render_pack_summary, resolve_asset_references,
 };
 use content::{build_room_asset_table, load_compiled_content, render_content_summary};
 use runtime::{default_runtime_skeleton, render_engine_stub, render_runtime_summary};
@@ -302,12 +302,15 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::create_dir_all(out_dir.join("assets"))?;
     fs::create_dir_all(out_dir.join("assets/compiled"))?;
     fs::create_dir_all(out_dir.join("content/packets"))?;
+    fs::create_dir_all(out_dir.join("content/previews"))?;
     let compiled_asset_packs = compile_placeholder_asset_packs(&out_dir.join("assets/compiled"), &assets)?;
     let scene_packets = build_scene_load_packets(
         &out_dir.join("content/packets"),
         &asset_resolution,
         &asset_resolution.entities,
     )?;
+    let scene_previews =
+        generate_scene_previews(&out_dir.join("content/previews"), &content, &assets, &asset_resolution)?;
     let plan = BuildPlan {
         project: &manifest.name,
         template: manifest.template,
@@ -328,6 +331,8 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
             "assets/compiled_manifest.json",
             "content/packets/*.bin",
             "content/scene_packets.json",
+            "content/previews/*.png",
+            "content/scene_previews.json",
             "memory layout and content contract reports",
             "build manifest and validation reports",
         ],
@@ -393,6 +398,10 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("content/scene_packets.json"),
         serde_json::to_vec_pretty(&scene_packets).map_err(to_io_error)?,
+    )?;
+    fs::write(
+        out_dir.join("content/scene_previews.json"),
+        serde_json::to_vec_pretty(&scene_previews).map_err(to_io_error)?,
     )?;
 
     println!(

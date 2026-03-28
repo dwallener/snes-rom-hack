@@ -1,5 +1,5 @@
 use super::TemplateKind;
-use crate::template::content::{CompiledContent, RoomAssetRecord};
+use crate::template::content::{CompiledContent, RoomAssetRecord, SceneDef};
 use png::{BitDepth, ColorType, Encoder};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -114,6 +114,11 @@ pub(crate) struct SceneLoadPacket {
     pub scene_id: String,
     pub output_file: String,
     pub commands: Vec<LoadCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ScenePreviewManifest {
+    pub previews: Vec<AssetPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -272,14 +277,28 @@ pub(crate) fn compile_placeholder_asset_packs(
     let mut previews = Vec::new();
 
     for asset in &assets.backgrounds {
+        let colors = palette_colors("background_basic");
+        let background = encode_background_blob(asset, &colors);
         compiled.push(write_asset_blob(
             out_dir,
             "background",
             asset.id,
             &asset.name,
             &asset.vram_slot,
-            &placeholder_blob("BGPK", asset.id, &asset.name, &asset.source, &asset.vram_slot),
+            &background.bytes,
         )?);
+        let preview_file = format!("background_{}_preview.png", sanitize_name(&asset.name));
+        write_rgba_preview(
+            &out_dir.join(&preview_file),
+            background.width,
+            background.height,
+            &background.preview_rgba,
+        )?;
+        previews.push(AssetPreview {
+            kind: "background".to_string(),
+            name: asset.name.clone(),
+            output_file: preview_file,
+        });
     }
     for asset in &assets.palettes {
         compiled.push(write_asset_blob(
@@ -427,8 +446,44 @@ pub(crate) fn render_pack_summary(
     out
 }
 
+pub(crate) fn generate_scene_previews(
+    out_dir: &Path,
+    content: &CompiledContent,
+    assets: &AssetBundle,
+    resolution: &AssetResolution,
+) -> io::Result<ScenePreviewManifest> {
+    fs::create_dir_all(out_dir)?;
+    let mut previews = Vec::new();
+    for scene in &content.scenes {
+        let file = format!("scene_{}_preview.png", sanitize_name(&scene.id));
+        let image = render_scene_preview(scene, content, assets, resolution)?;
+        write_rgba_preview(out_dir.join(&file).as_path(), image.width, image.height, &image.rgba)?;
+        previews.push(AssetPreview {
+            kind: "scene".to_string(),
+            name: scene.id.clone(),
+            output_file: file,
+        });
+    }
+    Ok(ScenePreviewManifest { previews })
+}
+
+#[derive(Debug, Clone)]
+struct RgbaImage {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
 #[derive(Debug, Clone)]
 struct EncodedSprite {
+    bytes: Vec<u8>,
+    preview_rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone)]
+struct EncodedBackground {
     bytes: Vec<u8>,
     preview_rgba: Vec<u8>,
     width: u32,
@@ -536,6 +591,46 @@ fn encode_palette_blob(asset: &PaletteAsset) -> Vec<u8> {
     out
 }
 
+fn encode_background_blob(asset: &BackgroundAsset, colors: &[[u8; 3]]) -> EncodedBackground {
+    let width = 128u32;
+    let height = 112u32;
+    let mut preview_rgba = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * 4) as usize;
+            let color = if asset.name.contains("title") {
+                if ((x / 8) + (y / 8)) % 2 == 0 {
+                    colors[1]
+                } else {
+                    colors[2]
+                }
+            } else if y > height - 24 {
+                colors[3]
+            } else if (x / 12 + y / 12) % 2 == 0 {
+                colors[1]
+            } else {
+                colors[2]
+            };
+            preview_rgba[idx..idx + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
+        }
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"BGR4");
+    bytes.extend_from_slice(&asset.id.to_le_bytes());
+    push_string(&mut bytes, &asset.name);
+    push_string(&mut bytes, &asset.source);
+    push_string(&mut bytes, &asset.vram_slot);
+    while bytes.len() % 16 != 0 {
+        bytes.push(0);
+    }
+    EncodedBackground {
+        bytes,
+        preview_rgba,
+        width,
+        height,
+    }
+}
+
 fn encode_sprite_blob(
     asset: &SpritePageAsset,
     palettes: &[PaletteAsset],
@@ -616,6 +711,99 @@ fn encode_breathing_ball(asset: &SpritePageAsset, palette: &PaletteAsset) -> io:
         width: preview_width,
         height: preview_height,
     })
+}
+
+fn render_scene_preview(
+    scene: &SceneDef,
+    content: &CompiledContent,
+    assets: &AssetBundle,
+    resolution: &AssetResolution,
+) -> io::Result<RgbaImage> {
+    let width = 128u32;
+    let height = 112u32;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+
+    let room = resolution
+        .rooms
+        .iter()
+        .find(|room| room.scene_id == scene.id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing resolved room"))?;
+    let background = assets
+        .backgrounds
+        .iter()
+        .find(|asset| asset.id == room.background_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing background asset"))?;
+    let bg_colors = palette_colors("background_basic");
+    let bg = encode_background_blob(background, &bg_colors);
+    rgba.copy_from_slice(&bg.preview_rgba);
+
+    let player = content
+        .entities
+        .iter()
+        .find(|entity| entity.kind == "player")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing player entity"))?;
+    let player_res = resolution
+        .entities
+        .iter()
+        .find(|entity| entity.entity_id == player.id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing resolved player entity"))?;
+    draw_entity_ball(&mut rgba, width, height, assets, player_res, parse_spawn(&scene.player_spawn), 0)?;
+
+    if scene.kind == "gameplay" {
+        if let Some(npc) = content.entities.iter().find(|entity| entity.kind == "npc") {
+            if let Some(npc_res) = resolution.entities.iter().find(|entity| entity.entity_id == npc.id) {
+                let (px, py) = parse_spawn(&scene.player_spawn);
+                draw_entity_ball(&mut rgba, width, height, assets, npc_res, (px + 32, py), 1)?;
+            }
+        }
+    }
+
+    Ok(RgbaImage { rgba, width, height })
+}
+
+fn draw_entity_ball(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    assets: &AssetBundle,
+    entity: &ResolvedEntityAssetRecord,
+    pos: (u32, u32),
+    frame: u8,
+) -> io::Result<()> {
+    let sprite = assets
+        .sprite_pages
+        .iter()
+        .find(|asset| asset.id == entity.sprite_page_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing sprite asset"))?;
+    let palette = assets
+        .palettes
+        .iter()
+        .find(|asset| asset.id == entity.palette_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing palette asset"))?;
+    let encoded = encode_breathing_ball(sprite, palette)?;
+    let frame_width = 16u32;
+    let frame_x = u32::from(frame % sprite.frame_count.max(1)) * frame_width;
+    for y in 0..16u32 {
+        for x in 0..16u32 {
+            let src = (((y * encoded.width) + frame_x + x) * 4) as usize;
+            let dst_x = pos.0.saturating_add(x).min(width.saturating_sub(1));
+            let dst_y = pos.1.saturating_add(y).min(height.saturating_sub(1));
+            let dst = (((dst_y * width) + dst_x) * 4) as usize;
+            if encoded.preview_rgba[src + 3] != 0 {
+                rgba[dst..dst + 4].copy_from_slice(&encoded.preview_rgba[src..src + 4]);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_spawn(raw: &str) -> (u32, u32) {
+    let Some((x, y)) = raw.split_once(',') else {
+        return (32, 32);
+    };
+    let x = x.trim().parse::<u32>().unwrap_or(8) * 4;
+    let y = y.trim().parse::<u32>().unwrap_or(8) * 4;
+    (x.min(96), y.min(80))
 }
 
 fn breathing_ball_frame(width: usize, height: usize, x_radius: f32, y_radius: f32) -> Vec<u8> {
