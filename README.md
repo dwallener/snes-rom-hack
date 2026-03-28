@@ -203,6 +203,12 @@ Emit the current build scaffold:
 cargo run -- template build --project /tmp/template-demo --out /tmp/template-demo-build
 ```
 
+Simulate a gameplay scene with D-pad input and emit frame previews:
+
+```bash
+cargo run -- template simulate --project /tmp/template-demo --out /tmp/template-demo-sim --input RRRRDDLLUU..RR
+```
+
 This is scaffold-only for now:
 
 - project manifest and folder conventions exist
@@ -216,4 +222,5 @@ This is scaffold-only for now:
 - placeholder binary asset packs and per-scene load packets are emitted for runtime consumption
 - sprite assets can now be procedurally generated as animated “breathing ball” previews for player/NPC validation
 - build output now includes composite title/gameplay scene preview PNGs generated from scene packets and asset bindings
+- `template simulate` now verifies player D-pad motion and simple NPC patrol movement through generated frame sequences
 - no engine/runtime ROM generation exists yet

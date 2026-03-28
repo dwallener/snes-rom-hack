@@ -122,6 +122,14 @@ pub(crate) struct ScenePreviewManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct FrameEntity {
+    pub entity_id: String,
+    pub x: u32,
+    pub y: u32,
+    pub frame: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct LoadCommand {
     pub kind: String,
     pub asset_id: u16,
@@ -467,6 +475,51 @@ pub(crate) fn generate_scene_previews(
     Ok(ScenePreviewManifest { previews })
 }
 
+pub(crate) fn render_scene_frame(
+    scene: &SceneDef,
+    assets: &AssetBundle,
+    resolution: &AssetResolution,
+    entities: &[FrameEntity],
+) -> io::Result<(Vec<u8>, u32, u32)> {
+    let width = 128u32;
+    let height = 112u32;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+
+    let room = resolution
+        .rooms
+        .iter()
+        .find(|room| room.scene_id == scene.id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing resolved room"))?;
+    let background = assets
+        .backgrounds
+        .iter()
+        .find(|asset| asset.id == room.background_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing background asset"))?;
+    let bg_colors = palette_colors("background_basic");
+    let bg = encode_background_blob(background, &bg_colors);
+    rgba.copy_from_slice(&bg.preview_rgba);
+
+    for entity in entities {
+        if let Some(resolved) = resolution
+            .entities
+            .iter()
+            .find(|item| item.entity_id == entity.entity_id)
+        {
+            draw_entity_ball(
+                &mut rgba,
+                width,
+                height,
+                assets,
+                resolved,
+                (entity.x, entity.y),
+                entity.frame,
+            )?;
+        }
+    }
+
+    Ok((rgba, width, height))
+}
+
 #[derive(Debug, Clone)]
 struct RgbaImage {
     rgba: Vec<u8>,
@@ -719,45 +772,31 @@ fn render_scene_preview(
     assets: &AssetBundle,
     resolution: &AssetResolution,
 ) -> io::Result<RgbaImage> {
-    let width = 128u32;
-    let height = 112u32;
-    let mut rgba = vec![0u8; (width * height * 4) as usize];
-
-    let room = resolution
-        .rooms
-        .iter()
-        .find(|room| room.scene_id == scene.id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing resolved room"))?;
-    let background = assets
-        .backgrounds
-        .iter()
-        .find(|asset| asset.id == room.background_id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing background asset"))?;
-    let bg_colors = palette_colors("background_basic");
-    let bg = encode_background_blob(background, &bg_colors);
-    rgba.copy_from_slice(&bg.preview_rgba);
-
     let player = content
         .entities
         .iter()
         .find(|entity| entity.kind == "player")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing player entity"))?;
-    let player_res = resolution
-        .entities
-        .iter()
-        .find(|entity| entity.entity_id == player.id)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing resolved player entity"))?;
-    draw_entity_ball(&mut rgba, width, height, assets, player_res, parse_spawn(&scene.player_spawn), 0)?;
+    let (px, py) = parse_spawn(&scene.player_spawn);
+    let mut entities = vec![FrameEntity {
+        entity_id: player.id.clone(),
+        x: px,
+        y: py,
+        frame: 0,
+    }];
 
     if scene.kind == "gameplay" {
         if let Some(npc) = content.entities.iter().find(|entity| entity.kind == "npc") {
-            if let Some(npc_res) = resolution.entities.iter().find(|entity| entity.entity_id == npc.id) {
-                let (px, py) = parse_spawn(&scene.player_spawn);
-                draw_entity_ball(&mut rgba, width, height, assets, npc_res, (px + 32, py), 1)?;
-            }
+            entities.push(FrameEntity {
+                entity_id: npc.id.clone(),
+                x: px + 32,
+                y: py,
+                frame: 1,
+            });
         }
     }
 
+    let (rgba, width, height) = render_scene_frame(scene, assets, resolution, &entities)?;
     Ok(RgbaImage { rgba, width, height })
 }
 
@@ -859,7 +898,7 @@ fn palette_colors(preset: &str) -> Vec<[u8; 3]> {
     }
 }
 
-fn write_rgba_preview(path: &Path, width: u32, height: u32, rgba: &[u8]) -> io::Result<()> {
+pub(crate) fn write_rgba_preview(path: &Path, width: u32, height: u32, rgba: &[u8]) -> io::Result<()> {
     let file = fs::File::create(path)?;
     let mut encoder = Encoder::new(file, width, height);
     encoder.set_color(ColorType::Rgba);

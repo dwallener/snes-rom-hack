@@ -1,6 +1,7 @@
 mod assets;
 mod content;
 mod runtime;
+mod sim;
 
 use serde::Serialize;
 use std::fs;
@@ -130,9 +131,10 @@ pub fn run_template_cli(args: &[String]) -> io::Result<()> {
         Some("validate") => run_template_validate_cli(&args[1..]),
         Some("preview-assets") => run_template_preview_assets_cli(&args[1..]),
         Some("build") => run_template_build_cli(&args[1..]),
+        Some("simulate") => sim::run_template_simulate_cli(&args[1..]),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "expected `template init|validate|preview-assets|build ...`",
+            "expected `template init|validate|preview-assets|build|simulate ...`",
         )),
     }
 }
