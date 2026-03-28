@@ -6,7 +6,10 @@ use serde::Serialize;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use assets::{load_asset_bundle, render_asset_summary, resolve_asset_references};
+use assets::{
+    build_scene_load_packets, compile_placeholder_asset_packs, load_asset_bundle, render_asset_summary,
+    render_pack_summary, resolve_asset_references,
+};
 use content::{build_room_asset_table, load_compiled_content, render_content_summary};
 use runtime::{default_runtime_skeleton, render_engine_stub, render_runtime_summary};
 
@@ -297,6 +300,14 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::create_dir_all(out_dir.join("engine"))?;
     fs::create_dir_all(out_dir.join("content"))?;
     fs::create_dir_all(out_dir.join("assets"))?;
+    fs::create_dir_all(out_dir.join("assets/compiled"))?;
+    fs::create_dir_all(out_dir.join("content/packets"))?;
+    let compiled_asset_packs = compile_placeholder_asset_packs(&out_dir.join("assets/compiled"), &assets)?;
+    let scene_packets = build_scene_load_packets(
+        &out_dir.join("content/packets"),
+        &asset_resolution,
+        &asset_resolution.entities,
+    )?;
     let plan = BuildPlan {
         project: &manifest.name,
         template: manifest.template,
@@ -313,7 +324,10 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
             "assets/asset_manifest.json",
             "assets/asset_resolution.json",
             "assets/asset_summary.txt",
-            "assets/compiled/*.bin (not implemented yet)",
+            "assets/compiled/*.bin",
+            "assets/compiled_manifest.json",
+            "content/packets/*.bin",
+            "content/scene_packets.json",
             "memory layout and content contract reports",
             "build manifest and validation reports",
         ],
@@ -326,7 +340,7 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("build_notes.txt"),
         format!(
-            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml,assets/**/*.toml,scenes/*.toml,entities/*.toml,scripts/*.toml\nengine=engine/runtime_stub.asm\ncontent=content/scene_manifest.json\nassets=assets/asset_manifest.json\n",
+            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml,assets/**/*.toml,scenes/*.toml,entities/*.toml,scripts/*.toml\nengine=engine/runtime_stub.asm\ncontent=content/scene_manifest.json\nassets=assets/asset_manifest.json\ncompiled=assets/compiled/*.bin\n",
             manifest.name,
             template_kind_name(manifest.template),
             runtime.status
@@ -367,6 +381,18 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("assets/asset_summary.txt"),
         render_asset_summary(&assets, &asset_resolution),
+    )?;
+    fs::write(
+        out_dir.join("assets/compiled_manifest.json"),
+        serde_json::to_vec_pretty(&compiled_asset_packs).map_err(to_io_error)?,
+    )?;
+    fs::write(
+        out_dir.join("assets/compiled_summary.txt"),
+        render_pack_summary(&compiled_asset_packs, &scene_packets),
+    )?;
+    fs::write(
+        out_dir.join("content/scene_packets.json"),
+        serde_json::to_vec_pretty(&scene_packets).map_err(to_io_error)?,
     )?;
 
     println!(

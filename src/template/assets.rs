@@ -76,6 +76,42 @@ pub(crate) struct AssetResolution {
     pub entities: Vec<ResolvedEntityAssetRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CompiledAssetPack {
+    pub assets: Vec<CompiledAssetBlob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CompiledAssetBlob {
+    pub kind: String,
+    pub id: u16,
+    pub name: String,
+    pub target: String,
+    pub output_file: String,
+    pub byte_len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SceneLoadPackets {
+    pub packets: Vec<SceneLoadPacket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SceneLoadPacket {
+    pub scene_id: String,
+    pub output_file: String,
+    pub commands: Vec<LoadCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct LoadCommand {
+    pub kind: String,
+    pub asset_id: u16,
+    pub target: String,
+    pub offset: u16,
+    pub size_bytes: u16,
+}
+
 pub(crate) fn load_asset_bundle(project: &Path, template: TemplateKind) -> io::Result<AssetBundle> {
     let bundle = AssetBundle {
         template,
@@ -204,6 +240,144 @@ pub(crate) fn render_asset_summary(assets: &AssetBundle, resolution: &AssetResol
     out
 }
 
+pub(crate) fn compile_placeholder_asset_packs(
+    out_dir: &Path,
+    assets: &AssetBundle,
+) -> io::Result<CompiledAssetPack> {
+    fs::create_dir_all(out_dir)?;
+    let mut compiled = Vec::new();
+
+    for asset in &assets.backgrounds {
+        compiled.push(write_asset_blob(
+            out_dir,
+            "background",
+            asset.id,
+            &asset.name,
+            &asset.vram_slot,
+            &placeholder_blob("BGPK", asset.id, &asset.name, &asset.source, &asset.vram_slot),
+        )?);
+    }
+    for asset in &assets.palettes {
+        compiled.push(write_asset_blob(
+            out_dir,
+            "palette",
+            asset.id,
+            &asset.name,
+            &asset.cgram_slot,
+            &placeholder_blob("PLPK", asset.id, &asset.name, &asset.source, &asset.cgram_slot),
+        )?);
+    }
+    for asset in &assets.sprite_pages {
+        compiled.push(write_asset_blob(
+            out_dir,
+            "sprite",
+            asset.id,
+            &asset.name,
+            &asset.vram_slot,
+            &placeholder_blob("SPPK", asset.id, &asset.name, &asset.source, &asset.vram_slot),
+        )?);
+    }
+    for asset in &assets.audio_tracks {
+        compiled.push(write_asset_blob(
+            out_dir,
+            "audio",
+            asset.id,
+            &asset.name,
+            &asset.kind,
+            &placeholder_blob("AUPK", asset.id, &asset.name, &asset.source, &asset.kind),
+        )?);
+    }
+
+    Ok(CompiledAssetPack { assets: compiled })
+}
+
+pub(crate) fn build_scene_load_packets(
+    out_dir: &Path,
+    resolution: &AssetResolution,
+    entity_resolution: &[ResolvedEntityAssetRecord],
+) -> io::Result<SceneLoadPackets> {
+    fs::create_dir_all(out_dir)?;
+    let mut packets = Vec::new();
+    for room in &resolution.rooms {
+        let commands = vec![
+            LoadCommand {
+                kind: "background".to_string(),
+                asset_id: room.background_id,
+                target: room.background_vram_slot.clone(),
+                offset: 0x0000,
+                size_bytes: 0x0100,
+            },
+            LoadCommand {
+                kind: "palette".to_string(),
+                asset_id: room.palette_id,
+                target: "palette0".to_string(),
+                offset: 0x0000,
+                size_bytes: 0x0020,
+            },
+            LoadCommand {
+                kind: "music".to_string(),
+                asset_id: room.music_id,
+                target: "apu_queue".to_string(),
+                offset: 0x0000,
+                size_bytes: 0x0010,
+            },
+        ];
+        let output_file = format!("scene_{:02}_{}.bin", packets.len(), room.scene_id);
+        fs::write(out_dir.join(&output_file), encode_scene_packet(&commands))?;
+        packets.push(SceneLoadPacket {
+            scene_id: room.scene_id.clone(),
+            output_file,
+            commands,
+        });
+    }
+
+    if !entity_resolution.is_empty() {
+        let output_file = "entity_pages.bin".to_string();
+        let commands = entity_resolution
+            .iter()
+            .map(|entity| LoadCommand {
+                kind: "sprite".to_string(),
+                asset_id: entity.sprite_page_id,
+                target: entity.sprite_vram_slot.clone(),
+                offset: 0x0000,
+                size_bytes: 0x0080,
+            })
+            .collect::<Vec<_>>();
+        fs::write(out_dir.join(&output_file), encode_scene_packet(&commands))?;
+        packets.push(SceneLoadPacket {
+            scene_id: "__entities__".to_string(),
+            output_file,
+            commands,
+        });
+    }
+
+    Ok(SceneLoadPackets { packets })
+}
+
+pub(crate) fn render_pack_summary(
+    compiled: &CompiledAssetPack,
+    packets: &SceneLoadPackets,
+) -> String {
+    let mut out = String::new();
+    out.push_str("Compiled Runtime Asset Packs\n");
+    for asset in &compiled.assets {
+        out.push_str(&format!(
+            "- {} #{} {} target={} bytes={} file={}\n",
+            asset.kind, asset.id, asset.name, asset.target, asset.byte_len, asset.output_file
+        ));
+    }
+    out.push_str("\nScene Load Packets\n");
+    for packet in &packets.packets {
+        out.push_str(&format!(
+            "- {} commands={} file={}\n",
+            packet.scene_id,
+            packet.commands.len(),
+            packet.output_file
+        ));
+    }
+    out
+}
+
 fn load_backgrounds(dir: &Path) -> io::Result<Vec<BackgroundAsset>> {
     let mut out = Vec::new();
     for (id, path) in sorted_toml_paths(dir)?.into_iter().enumerate() {
@@ -264,6 +438,78 @@ fn load_audio(dir: &Path) -> io::Result<Vec<AudioAsset>> {
         });
     }
     Ok(out)
+}
+
+fn write_asset_blob(
+    out_dir: &Path,
+    kind: &str,
+    id: u16,
+    name: &str,
+    target: &str,
+    bytes: &[u8],
+) -> io::Result<CompiledAssetBlob> {
+    let output_file = format!("{}_{}_{:02}.bin", kind, sanitize_name(name), id);
+    fs::write(out_dir.join(&output_file), bytes)?;
+    Ok(CompiledAssetBlob {
+        kind: kind.to_string(),
+        id,
+        name: name.to_string(),
+        target: target.to_string(),
+        output_file,
+        byte_len: bytes.len(),
+    })
+}
+
+fn placeholder_blob(magic: &str, id: u16, name: &str, source: &str, target: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(magic.as_bytes());
+    out.extend_from_slice(&id.to_le_bytes());
+    push_string(&mut out, name);
+    push_string(&mut out, source);
+    push_string(&mut out, target);
+    while out.len() % 16 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+fn encode_scene_packet(commands: &[LoadCommand]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"LDPK");
+    out.push(commands.len() as u8);
+    out.push(0);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    for command in commands {
+        out.push(kind_code(&command.kind));
+        out.push(0);
+        out.extend_from_slice(&command.asset_id.to_le_bytes());
+        out.extend_from_slice(&command.offset.to_le_bytes());
+        out.extend_from_slice(&command.size_bytes.to_le_bytes());
+        push_string(&mut out, &command.target);
+    }
+    out
+}
+
+fn kind_code(kind: &str) -> u8 {
+    match kind {
+        "background" => 1,
+        "palette" => 2,
+        "sprite" => 3,
+        "music" => 4,
+        "sfx" => 5,
+        _ => 0,
+    }
+}
+
+fn push_string(out: &mut Vec<u8>, value: &str) {
+    out.push(value.len().min(255) as u8);
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 fn validate_asset_bundle(bundle: &AssetBundle) -> io::Result<()> {
@@ -371,7 +617,10 @@ fn map_by_name_audio(items: &[AudioAsset]) -> BTreeMap<&str, &AudioAsset> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_asset_bundle, render_asset_summary, resolve_asset_references};
+    use super::{
+        build_scene_load_packets, compile_placeholder_asset_packs, load_asset_bundle, render_asset_summary,
+        render_pack_summary, resolve_asset_references,
+    };
     use crate::template::content::{build_room_asset_table, load_compiled_content};
     use crate::template::{
         GameManifest, TemplateKind, default_content_contracts, render_audio_asset_stub,
@@ -452,6 +701,19 @@ mod tests {
         assert!(summary.contains("Resolved Room Assets"));
         assert_eq!(resolution.rooms.len(), 2);
         assert_eq!(resolution.entities.len(), 1);
+
+        let compiled_assets =
+            compile_placeholder_asset_packs(&temp.join("build/assets"), &bundle).expect("packs");
+        let packets = build_scene_load_packets(
+            &temp.join("build/packets"),
+            &resolution,
+            &resolution.entities,
+        )
+        .expect("packets");
+        let pack_summary = render_pack_summary(&compiled_assets, &packets);
+        assert!(pack_summary.contains("Compiled Runtime Asset Packs"));
+        assert!(!compiled_assets.assets.is_empty());
+        assert!(packets.packets.iter().any(|packet| packet.scene_id == "title_room"));
 
         let _ = fs::remove_dir_all(&temp);
     }

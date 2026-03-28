@@ -385,6 +385,7 @@ Current state:
 - `template build` now emits compiled content manifests and room asset tables
 - asset definitions are now authored as structured TOML stubs
 - `template build` resolves scene and entity references into stable-id asset tables with VRAM-slot assignments
+- `template build` now also emits placeholder binary packs and per-scene load packets for runtime-side consumption
 
 ### Step 6. Add gameplay
 
