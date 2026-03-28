@@ -378,6 +378,12 @@ Goal:
 
 - build a ROM from a declarative project folder
 
+Current state:
+
+- scenes, entities, and scripts are now authored as structured TOML stubs
+- `template validate` parses and validates those files against the single-screen contracts
+- `template build` now emits compiled content manifests and room asset tables
+
 ### Step 6. Add gameplay
 
 Only after the runtime skeleton is stable:

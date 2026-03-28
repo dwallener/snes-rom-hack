@@ -1,9 +1,11 @@
+mod content;
 mod runtime;
 
 use serde::Serialize;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use content::{build_room_asset_table, load_compiled_content, render_content_summary};
 use runtime::{default_runtime_skeleton, render_engine_stub, render_runtime_summary};
 
 const REQUIRED_DIRS: &[&str] = &[
@@ -206,8 +208,10 @@ fn run_template_init_cli(args: &[String]) -> io::Result<()> {
 fn run_template_validate_cli(args: &[String]) -> io::Result<()> {
     let project = parse_project_arg(args, "template validate --project <dir>")?;
     let manifest = load_manifest(&project)?;
+    let contracts = default_content_contracts(manifest.template);
     let issues = validate_project_layout(&project);
     if issues.is_empty() {
+        load_compiled_content(&project, &manifest, &contracts)?;
         println!(
             "validated template project {} ({})",
             project.display(),
@@ -221,8 +225,10 @@ fn run_template_validate_cli(args: &[String]) -> io::Result<()> {
 fn run_template_preview_assets_cli(args: &[String]) -> io::Result<()> {
     let project = parse_project_arg(args, "template preview-assets --project <dir>")?;
     let manifest = load_manifest(&project)?;
+    let contracts = default_content_contracts(manifest.template);
+    let content = load_compiled_content(&project, &manifest, &contracts)?;
     let summary = format_asset_summary(&project, &manifest)?;
-    println!("{summary}");
+    println!("{summary}\n{}", render_content_summary(&content));
     Ok(())
 }
 
@@ -267,14 +273,18 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     })?;
 
     let manifest = load_manifest(&project)?;
+    let contracts = default_content_contracts(manifest.template);
     let issues = validate_project_layout(&project);
     if !issues.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, issues.join("; ")));
     }
+    let content = load_compiled_content(&project, &manifest, &contracts)?;
+    let room_table = build_room_asset_table(&content);
 
     fs::create_dir_all(&out_dir)?;
     let runtime = default_runtime_skeleton(manifest.template);
     fs::create_dir_all(out_dir.join("engine"))?;
+    fs::create_dir_all(out_dir.join("content"))?;
     let plan = BuildPlan {
         project: &manifest.name,
         template: manifest.template,
@@ -285,6 +295,9 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
             "engine/runtime_stub.asm",
             "engine/runtime_layout.json",
             "engine/runtime_summary.txt",
+            "content/scene_manifest.json",
+            "content/room_asset_table.json",
+            "content/content_summary.txt",
             "assets/compiled/*.bin (not implemented yet)",
             "memory layout and content contract reports",
             "build manifest and validation reports",
@@ -298,7 +311,7 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("build_notes.txt"),
         format!(
-            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml\nengine=engine/runtime_stub.asm\n",
+            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml,scenes/*.toml,entities/*.toml,scripts/*.toml\nengine=engine/runtime_stub.asm\ncontent=content/scene_manifest.json\n",
             manifest.name,
             template_kind_name(manifest.template),
             runtime.status
@@ -315,6 +328,18 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("engine/runtime_stub.asm"),
         render_engine_stub(&runtime),
+    )?;
+    fs::write(
+        out_dir.join("content/scene_manifest.json"),
+        serde_json::to_vec_pretty(&content).map_err(to_io_error)?,
+    )?;
+    fs::write(
+        out_dir.join("content/room_asset_table.json"),
+        serde_json::to_vec_pretty(&room_table).map_err(to_io_error)?,
+    )?;
+    fs::write(
+        out_dir.join("content/content_summary.txt"),
+        render_content_summary(&content),
     )?;
 
     println!(
@@ -690,7 +715,7 @@ fn format_asset_summary(project: &Path, manifest: &GameManifest) -> io::Result<S
 
 fn render_project_readme(manifest: &GameManifest) -> String {
     format!(
-        "# {}\n\nTemplate: `{}`\n\nThis project was initialized by `template init`.\n\nKey files:\n\n- `game.toml`: project manifest\n- `memory.toml`: cartridge memory layout and DMA budgets\n- `contracts.toml`: content limits and compile-time contracts\n- `scenes/title_room.toml`: startup title-room definition\n- `scenes/room_000.toml`: first gameplay room definition\n- `entities/player.toml`: player entity contract stub\n- `scripts/main.toml`: boot flow stub\n\nNext steps:\n\n1. review `memory.toml` and `contracts.toml`\n2. add placeholder assets under `assets/`\n3. define your title and first gameplay room in `scenes/*.toml`\n4. run `cargo run -- template validate --project {}`\n5. run `cargo run -- template build --project {} --out build/{}`\n",
+        "# {}\n\nTemplate: `{}`\n\nThis project was initialized by `template init`.\n\nKey files:\n\n- `game.toml`: project manifest\n- `memory.toml`: cartridge memory layout and DMA budgets\n- `contracts.toml`: content limits and compile-time contracts\n- `scenes/title_room.toml`: startup title-room definition\n- `scenes/room_000.toml`: first gameplay room definition\n- `entities/player.toml`: player entity contract stub\n- `scripts/main.toml`: boot flow stub\n\nBuild outputs now include:\n\n- `content/scene_manifest.json`: compiled scene/entity/script manifest\n- `content/room_asset_table.json`: per-scene background/music/transition table\n- `engine/runtime_summary.txt`: runtime layout summary\n\nNext steps:\n\n1. review `memory.toml` and `contracts.toml`\n2. add placeholder assets under `assets/`\n3. define your title and first gameplay room in `scenes/*.toml`\n4. run `cargo run -- template validate --project {}`\n5. run `cargo run -- template build --project {} --out build/{}`\n",
         manifest.title,
         template_kind_name(manifest.template),
         manifest.name,
