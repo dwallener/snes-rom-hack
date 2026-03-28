@@ -2,6 +2,8 @@ use super::assets::{
     FrameEntity, load_asset_bundle, render_scene_frame, resolve_asset_references, write_rgba_preview,
 };
 use super::content::{build_room_asset_table, load_compiled_content};
+use super::engine::{apply_input_frame, build_engine_plan, initial_boot_scene, runtime_entity_states};
+use super::runtime::default_runtime_skeleton;
 use super::{default_content_contracts, load_manifest};
 use serde::Serialize;
 use std::fs;
@@ -79,60 +81,47 @@ pub(crate) fn run_template_simulate_cli(args: &[String]) -> io::Result<()> {
     let assets = load_asset_bundle(&project, manifest.template)?;
     let room_table = build_room_asset_table(&content);
     let resolution = resolve_asset_references(&content, &assets, &room_table)?;
-    let scene = pick_scene(&content, scene_id.as_deref())?;
+    let runtime = default_runtime_skeleton(manifest.template);
+    let packets = super::assets::build_scene_load_packets(
+        &std::env::temp_dir().join("template-sim-packets"),
+        &resolution,
+        &resolution.entities,
+    )?;
+    let engine_plan = build_engine_plan(&content, &resolution, &packets, &runtime)?;
+    let default_scene = initial_boot_scene(&engine_plan).to_string();
+    let scene = pick_scene(&content, scene_id.as_deref().or(Some(default_scene.as_str())))?;
 
     fs::create_dir_all(&out_dir)?;
     let frames_dir = out_dir.join("frames");
     fs::create_dir_all(&frames_dir)?;
 
-    let player = content
-        .entities
-        .iter()
-        .find(|entity| entity.kind == "player")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing player entity"))?;
-    let npc = content.entities.iter().find(|entity| entity.kind == "npc");
-
-    let (mut player_x, mut player_y) = parse_spawn(&scene.player_spawn);
-    let (base_npc_x, base_npc_y) = (player_x + 32, player_y);
-    let mut npc_x = base_npc_x;
-    let npc_y = base_npc_y;
-    let mut npc_dir: i32 = 1;
+    let spawn = parse_spawn(&scene.player_spawn);
+    let mut states = runtime_entity_states(&engine_plan, spawn);
 
     let mut frames = Vec::new();
     for (frame_index, raw) in input.chars().enumerate() {
-        apply_dpad(raw, &mut player_x, &mut player_y);
-        if npc.is_some() {
-            let next = npc_x as i32 + npc_dir * 2;
-            if next < base_npc_x as i32 - 12 || next > base_npc_x as i32 + 12 {
-                npc_dir *= -1;
-            }
-            npc_x = (npc_x as i32 + npc_dir * 2).max(0) as u32;
-        }
-
-        let mut entities = vec![FrameEntity {
-            entity_id: player.id.clone(),
-            x: player_x,
-            y: player_y,
-            frame: (frame_index % 4) as u8,
-        }];
-        if let Some(npc) = npc {
-            entities.push(FrameEntity {
-                entity_id: npc.id.clone(),
-                x: npc_x,
-                y: npc_y,
-                frame: ((frame_index + 1) % 4) as u8,
-            });
-        }
+        apply_input_frame(&engine_plan, raw, spawn, &mut states);
+        let entities = states
+            .iter()
+            .map(|state| FrameEntity {
+                entity_id: state.entity_id.clone(),
+                x: state.x,
+                y: state.y,
+                frame: state.frame,
+            })
+            .collect::<Vec<_>>();
         let (rgba, width, height) = render_scene_frame(scene, &assets, &resolution, &entities)?;
         let output_file = format!("frame_{frame_index:03}.png");
         write_rgba_preview(&frames_dir.join(&output_file), width, height, &rgba)?;
+        let player = states.iter().find(|state| state.entity_id == "player");
+        let npc = states.iter().find(|state| state.entity_id == "npc_ball");
         frames.push(SimulationFrame {
             frame_index,
             input: raw.to_string(),
-            player_x,
-            player_y,
-            npc_x,
-            npc_y,
+            player_x: player.map(|s| s.x).unwrap_or(0),
+            player_y: player.map(|s| s.y).unwrap_or(0),
+            npc_x: npc.map(|s| s.x).unwrap_or(0),
+            npc_y: npc.map(|s| s.y).unwrap_or(0),
             output_file,
         });
     }
@@ -168,19 +157,10 @@ fn pick_scene<'a>(
     content
         .scenes
         .iter()
-        .find(|scene| scene.kind == "gameplay")
+        .find(|scene| scene.id == requested.unwrap_or(""))
+        .or_else(|| content.scenes.iter().find(|scene| scene.kind == "gameplay"))
         .or_else(|| content.scenes.first())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no scenes found"))
-}
-
-fn apply_dpad(ch: char, x: &mut u32, y: &mut u32) {
-    match ch {
-        'L' | 'l' => *x = x.saturating_sub(4),
-        'R' | 'r' => *x = (*x + 4).min(108),
-        'U' | 'u' => *y = y.saturating_sub(4),
-        'D' | 'd' => *y = (*y + 4).min(92),
-        _ => {}
-    }
 }
 
 fn parse_spawn(raw: &str) -> (u32, u32) {
@@ -214,19 +194,7 @@ fn render_simulation_summary(report: &SimulationReport) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_dpad, render_simulation_summary, SimulationReport, SimulationFrame};
-
-    #[test]
-    fn dpad_moves_player_in_expected_direction() {
-        let mut x = 20;
-        let mut y = 20;
-        apply_dpad('R', &mut x, &mut y);
-        apply_dpad('D', &mut x, &mut y);
-        assert_eq!((x, y), (24, 24));
-        apply_dpad('L', &mut x, &mut y);
-        apply_dpad('U', &mut x, &mut y);
-        assert_eq!((x, y), (20, 20));
-    }
+    use super::{render_simulation_summary, SimulationReport, SimulationFrame};
 
     #[test]
     fn summary_lists_frames() {

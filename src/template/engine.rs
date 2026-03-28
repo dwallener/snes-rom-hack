@@ -35,6 +35,15 @@ pub(crate) struct EntityRuntimeBinding {
     pub movement_rule: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct RuntimeEntityState {
+    pub entity_id: String,
+    pub x: u32,
+    pub y: u32,
+    pub frame: u8,
+    pub facing: i8,
+}
+
 pub(crate) fn build_engine_plan(
     content: &CompiledContent,
     resolution: &AssetResolution,
@@ -184,13 +193,92 @@ pub(crate) fn render_engine_frame_logic(plan: &EngineBuildPlan) -> String {
     out
 }
 
+pub(crate) fn initial_boot_scene(plan: &EngineBuildPlan) -> &str {
+    &plan.boot_scene
+}
+
+pub(crate) fn apply_input_frame(
+    plan: &EngineBuildPlan,
+    input: char,
+    scene_spawn: (u32, u32),
+    states: &mut [RuntimeEntityState],
+) {
+    for state in states.iter_mut() {
+        if let Some(binding) = plan
+            .entity_runtime
+            .iter()
+            .find(|binding| binding.entity_id == state.entity_id)
+        {
+            match binding.movement_rule {
+                "dpad_4way" => apply_player_rule(state, binding.speed, input),
+                "horizontal_patrol" => apply_patrol_rule(state, scene_spawn.0 + 32, binding.speed),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn apply_player_rule(state: &mut RuntimeEntityState, speed: u16, input: char) {
+    let speed = u32::from(speed.max(1));
+    match input {
+        'L' | 'l' => {
+            state.x = state.x.saturating_sub(speed * 2);
+            state.facing = -1;
+        }
+        'R' | 'r' => {
+            state.x = (state.x + speed * 2).min(108);
+            state.facing = 1;
+        }
+        'U' | 'u' => state.y = state.y.saturating_sub(speed * 2),
+        'D' | 'd' => state.y = (state.y + speed * 2).min(92),
+        _ => {}
+    }
+    state.frame = state.frame.wrapping_add(1) % 4;
+}
+
+fn apply_patrol_rule(state: &mut RuntimeEntityState, center_x: u32, speed: u16) {
+    let speed = i32::from(speed.max(1)) * 2;
+    let mut next = state.x as i32 + i32::from(state.facing) * speed;
+    let min_x = center_x as i32 - 12;
+    let max_x = center_x as i32 + 12;
+    if next < min_x || next > max_x {
+        state.facing *= -1;
+        next = state.x as i32 + i32::from(state.facing) * speed;
+    }
+    state.x = next.max(0) as u32;
+    state.frame = state.frame.wrapping_add(1) % 4;
+}
+
+pub(crate) fn runtime_entity_states(
+    plan: &EngineBuildPlan,
+    player_spawn: (u32, u32),
+) -> Vec<RuntimeEntityState> {
+    plan.entity_runtime
+        .iter()
+        .map(|entity| RuntimeEntityState {
+            entity_id: entity.entity_id.clone(),
+            x: if entity.kind == "player" {
+                player_spawn.0
+            } else {
+                player_spawn.0 + 32
+            },
+            y: player_spawn.1,
+            frame: if entity.kind == "player" { 0 } else { 1 },
+            facing: if entity.kind == "player" { 1 } else { 1 },
+        })
+        .collect()
+}
+
 fn parse_boot_scene(raw: &str) -> Option<String> {
     raw.strip_prefix("load_scene ").map(ToOwned::to_owned)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_engine_plan, render_engine_build_summary, render_engine_frame_logic};
+    use super::{
+        EngineBuildPlan, EntityRuntimeBinding, apply_input_frame, build_engine_plan,
+        render_engine_build_summary, render_engine_frame_logic, runtime_entity_states,
+    };
     use crate::template::assets::{AssetResolution, ResolvedEntityAssetRecord, ResolvedRoomAssetRecord, SceneLoadPacket, SceneLoadPackets};
     use crate::template::content::{CompiledContent, EntityDef, SceneDef, ScriptDef};
     use crate::template::runtime::default_runtime_skeleton;
@@ -262,5 +350,39 @@ mod tests {
         assert!(summary.contains("boot_scene: title_room"));
         let asm = render_engine_frame_logic(&plan);
         assert!(asm.contains("frame_main_loop"));
+    }
+
+    #[test]
+    fn applies_generated_player_and_npc_rules() {
+        let plan = EngineBuildPlan {
+            boot_scene: "title_room".to_string(),
+            joypad_map: vec![],
+            frame_steps: vec![],
+            scene_packet_map: vec![],
+            entity_runtime: vec![
+                EntityRuntimeBinding {
+                    entity_id: "player".to_string(),
+                    kind: "player".to_string(),
+                    sprite_page_id: 1,
+                    palette_id: 2,
+                    speed: 2,
+                    movement_rule: "dpad_4way",
+                },
+                EntityRuntimeBinding {
+                    entity_id: "npc_ball".to_string(),
+                    kind: "npc".to_string(),
+                    sprite_page_id: 0,
+                    palette_id: 1,
+                    speed: 1,
+                    movement_rule: "horizontal_patrol",
+                },
+            ],
+        };
+        let mut states = runtime_entity_states(&plan, (32, 32));
+        apply_input_frame(&plan, 'R', (32, 32), &mut states);
+        let player = states.iter().find(|s| s.entity_id == "player").unwrap();
+        let npc = states.iter().find(|s| s.entity_id == "npc_ball").unwrap();
+        assert_eq!(player.x, 36);
+        assert_ne!(npc.x, 64);
     }
 }
