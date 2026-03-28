@@ -349,6 +349,17 @@ Goal:
 
 - first visible template ROM
 
+Current state:
+
+- project generation now emits explicit `memory.toml` and `contracts.toml`
+- build output now emits a concrete runtime skeleton:
+  - engine module layout
+  - WRAM ownership
+  - VRAM slot plan
+  - frame schedule
+  - scene flow
+  - stub engine entrypoints
+
 ### Step 5. Build the authoring/build loop
 
 Implement:

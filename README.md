@@ -209,4 +209,5 @@ This is scaffold-only for now:
 - cartridge memory model and content contracts are emitted as `memory.toml` and `contracts.toml`
 - validation exists
 - build-plan emission exists
+- runtime layout and engine stub emission exist under `engine/`
 - no engine/runtime ROM generation exists yet

@@ -1,7 +1,10 @@
+mod runtime;
+
 use serde::Serialize;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use runtime::{default_runtime_skeleton, render_engine_stub, render_runtime_summary};
 
 const REQUIRED_DIRS: &[&str] = &[
     "assets",
@@ -270,14 +273,18 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     }
 
     fs::create_dir_all(&out_dir)?;
+    let runtime = default_runtime_skeleton(manifest.template);
+    fs::create_dir_all(out_dir.join("engine"))?;
     let plan = BuildPlan {
         project: &manifest.name,
         template: manifest.template,
         title: &manifest.title,
         region: &manifest.region,
-        runtime_status: "scaffold-only",
+        runtime_status: runtime.status,
         planned_outputs: vec![
-            "engine/runtime.sfc (not implemented yet)",
+            "engine/runtime_stub.asm",
+            "engine/runtime_layout.json",
+            "engine/runtime_summary.txt",
             "assets/compiled/*.bin (not implemented yet)",
             "memory layout and content contract reports",
             "build manifest and validation reports",
@@ -291,10 +298,23 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("build_notes.txt"),
         format!(
-            "Template build scaffold\nproject={}\ntemplate={}\nstatus=scaffold-only\ninputs=game.toml,memory.toml,contracts.toml\n",
+            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml\nengine=engine/runtime_stub.asm\n",
             manifest.name,
-            template_kind_name(manifest.template)
+            template_kind_name(manifest.template),
+            runtime.status
         ),
+    )?;
+    fs::write(
+        out_dir.join("engine/runtime_layout.json"),
+        serde_json::to_vec_pretty(&runtime).map_err(to_io_error)?,
+    )?;
+    fs::write(
+        out_dir.join("engine/runtime_summary.txt"),
+        render_runtime_summary(&runtime),
+    )?;
+    fs::write(
+        out_dir.join("engine/runtime_stub.asm"),
+        render_engine_stub(&runtime),
     )?;
 
     println!(
