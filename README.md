@@ -209,6 +209,31 @@ Simulate a gameplay scene with D-pad input and emit frame previews:
 cargo run -- template simulate --project /tmp/template-demo --out /tmp/template-demo-sim --input RRRRDDLLUU..RR
 ```
 
+## Designer App
+
+The first `PLAN_005` slice adds a minimal Streamlit designer app for the one-screen arena battle variant.
+
+Install:
+
+```bash
+python3 -m pip install -r requirements-designer.txt
+```
+
+Run:
+
+```bash
+streamlit run tools/designer_app.py
+```
+
+The app currently:
+
+- creates or opens a `single-screen-action` project
+- edits title/arena, player, and NPC fields
+- runs `template validate`
+- runs `template build`
+- runs `template simulate`
+- shows generated preview images and logs
+
 This is scaffold-only for now:
 
 - project manifest and folder conventions exist
