@@ -14,6 +14,8 @@ const REQUIRED_DIRS: &[&str] = &[
     "scripts",
 ];
 
+const REQUIRED_FILES: &[&str] = &["game.toml", "memory.toml", "contracts.toml", "README.md"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TemplateKind {
@@ -31,6 +33,75 @@ pub struct GameManifest {
     pub title: String,
     pub region: String,
     pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MemoryModel<'a> {
+    template: TemplateKind,
+    engine_region: BankRegion<'a>,
+    content_region: BankRegion<'a>,
+    work_ram: BankRegion<'a>,
+    vram: BankRegion<'a>,
+    cgram: BankRegion<'a>,
+    oam: BankRegion<'a>,
+    dma_budget: DmaBudget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct BankRegion<'a> {
+    name: &'a str,
+    start: &'a str,
+    end: &'a str,
+    purpose: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DmaBudget {
+    vram_bytes_per_frame: u16,
+    cgram_bytes_per_frame: u16,
+    oam_bytes_per_frame: u16,
+    max_transfers_per_frame: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ContentContracts<'a> {
+    template: TemplateKind,
+    scenes: SceneContract<'a>,
+    sprites: SpriteContract<'a>,
+    entities: EntityContract<'a>,
+    audio: AudioContract<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SceneContract<'a> {
+    scene_format: &'a str,
+    max_rooms: u16,
+    tilemap_size: &'a str,
+    background_layers: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SpriteContract<'a> {
+    sprite_format: &'a str,
+    palette_format: &'a str,
+    max_sprite_tiles_per_room: u16,
+    max_metasprites_per_room: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct EntityContract<'a> {
+    entity_format: &'a str,
+    max_entities_per_room: u16,
+    player_slots: u8,
+    script_hook_format: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AudioContract<'a> {
+    music_format: &'a str,
+    sfx_format: &'a str,
+    max_music_tracks: u8,
+    max_sfx_ids: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -208,6 +279,7 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
         planned_outputs: vec![
             "engine/runtime.sfc (not implemented yet)",
             "assets/compiled/*.bin (not implemented yet)",
+            "memory layout and content contract reports",
             "build manifest and validation reports",
         ],
     };
@@ -219,7 +291,7 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("build_notes.txt"),
         format!(
-            "Template build scaffold\nproject={}\ntemplate={}\nstatus=scaffold-only\n",
+            "Template build scaffold\nproject={}\ntemplate={}\nstatus=scaffold-only\ninputs=game.toml,memory.toml,contracts.toml\n",
             manifest.name,
             template_kind_name(manifest.template)
         ),
@@ -247,6 +319,14 @@ fn create_template_project(project: &Path, manifest: &GameManifest) -> io::Resul
     }
 
     fs::write(project.join("game.toml"), render_manifest(manifest))?;
+    fs::write(
+        project.join("memory.toml"),
+        render_memory_model(&default_memory_model(manifest.template)),
+    )?;
+    fs::write(
+        project.join("contracts.toml"),
+        render_content_contracts(&default_content_contracts(manifest.template)),
+    )?;
     fs::write(project.join("README.md"), render_project_readme(manifest))?;
     fs::write(
         project.join("scenes/room_000.txt"),
@@ -272,6 +352,233 @@ fn render_manifest(manifest: &GameManifest) -> String {
         manifest.title,
         manifest.region,
         manifest.version
+    )
+}
+
+fn default_memory_model(template: TemplateKind) -> MemoryModel<'static> {
+    match template {
+        TemplateKind::SingleScreenAction => MemoryModel {
+            template,
+            engine_region: BankRegion {
+                name: "engine",
+                start: "$80:8000",
+                end: "$83:FFFF",
+                purpose: "runtime code, common systems, scene loop, DMA scheduler",
+            },
+            content_region: BankRegion {
+                name: "content",
+                start: "$84:8000",
+                end: "$9F:FFFF",
+                purpose: "compiled graphics, maps, scripts, tables, audio descriptors",
+            },
+            work_ram: BankRegion {
+                name: "wram",
+                start: "$7E:0000",
+                end: "$7F:FFFF",
+                purpose: "entity state, transfer staging, scene state, decompression buffers",
+            },
+            vram: BankRegion {
+                name: "vram",
+                start: "$0000",
+                end: "$7FFF",
+                purpose: "background tiles, sprite tiles, dynamic upload windows",
+            },
+            cgram: BankRegion {
+                name: "cgram",
+                start: "$0000",
+                end: "$01FF",
+                purpose: "background and sprite palettes",
+            },
+            oam: BankRegion {
+                name: "oam",
+                start: "$0000",
+                end: "$023F",
+                purpose: "metasprite attribute staging and hardware sprite list",
+            },
+            dma_budget: DmaBudget {
+                vram_bytes_per_frame: 4096,
+                cgram_bytes_per_frame: 256,
+                oam_bytes_per_frame: 544,
+                max_transfers_per_frame: 8,
+            },
+        },
+        other => MemoryModel {
+            template: other,
+            engine_region: BankRegion {
+                name: "engine",
+                start: "$80:8000",
+                end: "$83:FFFF",
+                purpose: "runtime code and fixed engine systems",
+            },
+            content_region: BankRegion {
+                name: "content",
+                start: "$84:8000",
+                end: "$9F:FFFF",
+                purpose: "compiled template content banks",
+            },
+            work_ram: BankRegion {
+                name: "wram",
+                start: "$7E:0000",
+                end: "$7F:FFFF",
+                purpose: "scene state, streaming buffers, entity state",
+            },
+            vram: BankRegion {
+                name: "vram",
+                start: "$0000",
+                end: "$7FFF",
+                purpose: "template-managed graphics windows",
+            },
+            cgram: BankRegion {
+                name: "cgram",
+                start: "$0000",
+                end: "$01FF",
+                purpose: "palette memory",
+            },
+            oam: BankRegion {
+                name: "oam",
+                start: "$0000",
+                end: "$023F",
+                purpose: "sprite attributes",
+            },
+            dma_budget: DmaBudget {
+                vram_bytes_per_frame: 3072,
+                cgram_bytes_per_frame: 256,
+                oam_bytes_per_frame: 544,
+                max_transfers_per_frame: 8,
+            },
+        },
+    }
+}
+
+fn default_content_contracts(template: TemplateKind) -> ContentContracts<'static> {
+    match template {
+        TemplateKind::SingleScreenAction => ContentContracts {
+            template,
+            scenes: SceneContract {
+                scene_format: "room text stub -> compiled room table",
+                max_rooms: 64,
+                tilemap_size: "32x32",
+                background_layers: 1,
+            },
+            sprites: SpriteContract {
+                sprite_format: "indexed PNG -> 4bpp tiles + metasprite frames",
+                palette_format: "indexed PNG palette -> CGRAM set",
+                max_sprite_tiles_per_room: 512,
+                max_metasprites_per_room: 64,
+            },
+            entities: EntityContract {
+                entity_format: "text stub -> entity table",
+                max_entities_per_room: 24,
+                player_slots: 1,
+                script_hook_format: "boot/update/contact hooks",
+            },
+            audio: AudioContract {
+                music_format: "named track references",
+                sfx_format: "named sound-effect references",
+                max_music_tracks: 16,
+                max_sfx_ids: 64,
+            },
+        },
+        other => ContentContracts {
+            template: other,
+            scenes: SceneContract {
+                scene_format: "template-defined scene manifest",
+                max_rooms: 128,
+                tilemap_size: "template-defined",
+                background_layers: 2,
+            },
+            sprites: SpriteContract {
+                sprite_format: "indexed PNG -> compiled template sprite pack",
+                palette_format: "palette file -> compiled CGRAM pack",
+                max_sprite_tiles_per_room: 768,
+                max_metasprites_per_room: 96,
+            },
+            entities: EntityContract {
+                entity_format: "entity defs -> template entity table",
+                max_entities_per_room: 32,
+                player_slots: 1,
+                script_hook_format: "template-defined script hooks",
+            },
+            audio: AudioContract {
+                music_format: "track reference manifest",
+                sfx_format: "effect reference manifest",
+                max_music_tracks: 24,
+                max_sfx_ids: 96,
+            },
+        },
+    }
+}
+
+fn render_memory_model(model: &MemoryModel<'_>) -> String {
+    format!(
+        concat!(
+            "template = \"{}\"\n\n",
+            "[engine]\nname = \"{}\"\nstart = \"{}\"\nend = \"{}\"\npurpose = \"{}\"\n\n",
+            "[content]\nname = \"{}\"\nstart = \"{}\"\nend = \"{}\"\npurpose = \"{}\"\n\n",
+            "[wram]\nname = \"{}\"\nstart = \"{}\"\nend = \"{}\"\npurpose = \"{}\"\n\n",
+            "[vram]\nname = \"{}\"\nstart = \"{}\"\nend = \"{}\"\npurpose = \"{}\"\n\n",
+            "[cgram]\nname = \"{}\"\nstart = \"{}\"\nend = \"{}\"\npurpose = \"{}\"\n\n",
+            "[oam]\nname = \"{}\"\nstart = \"{}\"\nend = \"{}\"\npurpose = \"{}\"\n\n",
+            "[dma_budget]\nvram_bytes_per_frame = {}\ncgram_bytes_per_frame = {}\noam_bytes_per_frame = {}\nmax_transfers_per_frame = {}\n"
+        ),
+        template_kind_name(model.template),
+        model.engine_region.name,
+        model.engine_region.start,
+        model.engine_region.end,
+        model.engine_region.purpose,
+        model.content_region.name,
+        model.content_region.start,
+        model.content_region.end,
+        model.content_region.purpose,
+        model.work_ram.name,
+        model.work_ram.start,
+        model.work_ram.end,
+        model.work_ram.purpose,
+        model.vram.name,
+        model.vram.start,
+        model.vram.end,
+        model.vram.purpose,
+        model.cgram.name,
+        model.cgram.start,
+        model.cgram.end,
+        model.cgram.purpose,
+        model.oam.name,
+        model.oam.start,
+        model.oam.end,
+        model.oam.purpose,
+        model.dma_budget.vram_bytes_per_frame,
+        model.dma_budget.cgram_bytes_per_frame,
+        model.dma_budget.oam_bytes_per_frame,
+        model.dma_budget.max_transfers_per_frame
+    )
+}
+
+fn render_content_contracts(contracts: &ContentContracts<'_>) -> String {
+    format!(
+        concat!(
+            "template = \"{}\"\n\n",
+            "[scenes]\nscene_format = \"{}\"\nmax_rooms = {}\ntilemap_size = \"{}\"\nbackground_layers = {}\n\n",
+            "[sprites]\nsprite_format = \"{}\"\npalette_format = \"{}\"\nmax_sprite_tiles_per_room = {}\nmax_metasprites_per_room = {}\n\n",
+            "[entities]\nentity_format = \"{}\"\nmax_entities_per_room = {}\nplayer_slots = {}\nscript_hook_format = \"{}\"\n\n",
+            "[audio]\nmusic_format = \"{}\"\nsfx_format = \"{}\"\nmax_music_tracks = {}\nmax_sfx_ids = {}\n"
+        ),
+        template_kind_name(contracts.template),
+        contracts.scenes.scene_format,
+        contracts.scenes.max_rooms,
+        contracts.scenes.tilemap_size,
+        contracts.scenes.background_layers,
+        contracts.sprites.sprite_format,
+        contracts.sprites.palette_format,
+        contracts.sprites.max_sprite_tiles_per_room,
+        contracts.sprites.max_metasprites_per_room,
+        contracts.entities.entity_format,
+        contracts.entities.max_entities_per_room,
+        contracts.entities.player_slots,
+        contracts.entities.script_hook_format,
+        contracts.audio.music_format,
+        contracts.audio.sfx_format,
+        contracts.audio.max_music_tracks,
+        contracts.audio.max_sfx_ids
     )
 }
 
@@ -319,8 +626,10 @@ fn parse_manifest(text: &str) -> io::Result<GameManifest> {
 
 fn validate_project_layout(project: &Path) -> Vec<String> {
     let mut issues = Vec::new();
-    if !project.join("game.toml").is_file() {
-        issues.push("missing game.toml".to_string());
+    for file in REQUIRED_FILES {
+        if !project.join(file).is_file() {
+            issues.push(format!("missing required file `{file}`"));
+        }
     }
     for dir in REQUIRED_DIRS {
         if !project.join(dir).is_dir() {
@@ -343,12 +652,17 @@ fn format_asset_summary(project: &Path, manifest: &GameManifest) -> io::Result<S
         let count = fs::read_dir(project.join(dir))?.count();
         out.push_str(&format!("{dir}: {count} entries\n"));
     }
+    out.push('\n');
+    for file in ["memory.toml", "contracts.toml"] {
+        let bytes = fs::read_to_string(project.join(file))?.len();
+        out.push_str(&format!("{file}: {bytes} bytes\n"));
+    }
     Ok(out)
 }
 
 fn render_project_readme(manifest: &GameManifest) -> String {
     format!(
-        "# {}\n\nTemplate: `{}`\n\nThis project was initialized by `template init`.\n\nNext steps:\n\n1. add placeholder assets under `assets/`\n2. define your first room in `scenes/room_000.txt`\n3. run `cargo run -- template validate --project {}`\n4. run `cargo run -- template build --project {} --out build/{}`\n",
+        "# {}\n\nTemplate: `{}`\n\nThis project was initialized by `template init`.\n\nKey files:\n\n- `game.toml`: project manifest\n- `memory.toml`: cartridge memory layout and DMA budgets\n- `contracts.toml`: content limits and compile-time contracts\n\nNext steps:\n\n1. review `memory.toml` and `contracts.toml`\n2. add placeholder assets under `assets/`\n3. define your first room in `scenes/room_000.txt`\n4. run `cargo run -- template validate --project {}`\n5. run `cargo run -- template build --project {} --out build/{}`\n",
         manifest.title,
         template_kind_name(manifest.template),
         manifest.name,
@@ -401,7 +715,11 @@ fn to_io_error(error: impl std::fmt::Display) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{GameManifest, TemplateKind, parse_manifest, render_manifest, title_case, validate_project_layout};
+    use super::{
+        GameManifest, TemplateKind, default_content_contracts, default_memory_model, parse_manifest,
+        render_content_contracts, render_manifest, render_memory_model, title_case,
+        validate_project_layout,
+    };
     use std::fs;
 
     #[test]
@@ -431,5 +749,20 @@ mod tests {
         let issues = validate_project_layout(&temp);
         assert!(issues.iter().any(|issue| issue.contains("assets")));
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn memory_model_render_mentions_engine_and_dma_budget() {
+        let text = render_memory_model(&default_memory_model(TemplateKind::SingleScreenAction));
+        assert!(text.contains("[engine]"));
+        assert!(text.contains("vram_bytes_per_frame = 4096"));
+    }
+
+    #[test]
+    fn content_contract_render_mentions_scene_limits() {
+        let text =
+            render_content_contracts(&default_content_contracts(TemplateKind::SingleScreenAction));
+        assert!(text.contains("[scenes]"));
+        assert!(text.contains("max_entities_per_room = 24"));
     }
 }

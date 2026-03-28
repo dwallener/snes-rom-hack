@@ -213,6 +213,11 @@ The exact layout can evolve, but the principle is fixed:
 - authored assets live outside engine code
 - the builder converts authored assets into engine-ready ROM data
 
+The generated project should also carry explicit engine assumptions:
+
+- `memory.toml` for bank layout, WRAM usage, VRAM ownership, and DMA budgets
+- `contracts.toml` for per-template scene, sprite, entity, and audio limits
+
 ## Single Screen Action Template Scope
 
 This first template should support:

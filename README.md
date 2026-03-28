@@ -206,6 +206,7 @@ cargo run -- template build --project /tmp/template-demo --out /tmp/template-dem
 This is scaffold-only for now:
 
 - project manifest and folder conventions exist
+- cartridge memory model and content contracts are emitted as `memory.toml` and `contracts.toml`
 - validation exists
 - build-plan emission exists
 - no engine/runtime ROM generation exists yet
