@@ -1,5 +1,6 @@
 use super::TemplateKind;
 use crate::template::content::{CompiledContent, RoomAssetRecord};
+use png::{BitDepth, ColorType, Encoder};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -31,6 +32,7 @@ pub(crate) struct PaletteAsset {
     pub name: String,
     pub source: String,
     pub cgram_slot: String,
+    pub preset: String,
     pub source_file: String,
 }
 
@@ -41,6 +43,8 @@ pub(crate) struct SpritePageAsset {
     pub source: String,
     pub palette: String,
     pub vram_slot: String,
+    pub generator: String,
+    pub frame_count: u8,
     pub source_file: String,
 }
 
@@ -68,6 +72,7 @@ pub(crate) struct ResolvedEntityAssetRecord {
     pub entity_id: String,
     pub sprite_page_id: u16,
     pub sprite_vram_slot: String,
+    pub palette_id: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -79,6 +84,7 @@ pub(crate) struct AssetResolution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CompiledAssetPack {
     pub assets: Vec<CompiledAssetBlob>,
+    pub previews: Vec<AssetPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -89,6 +95,13 @@ pub(crate) struct CompiledAssetBlob {
     pub target: String,
     pub output_file: String,
     pub byte_len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AssetPreview {
+    pub kind: String,
+    pub name: String,
+    pub output_file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -175,10 +188,20 @@ pub(crate) fn resolve_asset_references(
                 ),
             )
         })?;
+        let palette = palette_ids.get(entity.palette.as_str()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unknown palette `{}` for entity `{}`",
+                    entity.palette, entity.id
+                ),
+            )
+        })?;
         entities.push(ResolvedEntityAssetRecord {
             entity_id: entity.id.clone(),
             sprite_page_id: sprite.id,
             sprite_vram_slot: sprite.vram_slot.clone(),
+            palette_id: palette.id,
         });
     }
 
@@ -233,8 +256,8 @@ pub(crate) fn render_asset_summary(assets: &AssetBundle, resolution: &AssetResol
     out.push_str("\nResolved Entity Assets\n");
     for entity in &resolution.entities {
         out.push_str(&format!(
-            "- {} sprite_page={} slot={}\n",
-            entity.entity_id, entity.sprite_page_id, entity.sprite_vram_slot
+            "- {} sprite_page={} palette={} slot={}\n",
+            entity.entity_id, entity.sprite_page_id, entity.palette_id, entity.sprite_vram_slot
         ));
     }
     out
@@ -246,6 +269,7 @@ pub(crate) fn compile_placeholder_asset_packs(
 ) -> io::Result<CompiledAssetPack> {
     fs::create_dir_all(out_dir)?;
     let mut compiled = Vec::new();
+    let mut previews = Vec::new();
 
     for asset in &assets.backgrounds {
         compiled.push(write_asset_blob(
@@ -264,18 +288,31 @@ pub(crate) fn compile_placeholder_asset_packs(
             asset.id,
             &asset.name,
             &asset.cgram_slot,
-            &placeholder_blob("PLPK", asset.id, &asset.name, &asset.source, &asset.cgram_slot),
+            &encode_palette_blob(asset),
         )?);
     }
     for asset in &assets.sprite_pages {
+        let sprite = encode_sprite_blob(asset, &assets.palettes)?;
         compiled.push(write_asset_blob(
             out_dir,
             "sprite",
             asset.id,
             &asset.name,
             &asset.vram_slot,
-            &placeholder_blob("SPPK", asset.id, &asset.name, &asset.source, &asset.vram_slot),
+            &sprite.bytes,
         )?);
+        let preview_file = format!("sprite_{}_preview.png", sanitize_name(&asset.name));
+        write_rgba_preview(
+            &out_dir.join(&preview_file),
+            sprite.width,
+            sprite.height,
+            &sprite.preview_rgba,
+        )?;
+        previews.push(AssetPreview {
+            kind: "sprite".to_string(),
+            name: asset.name.clone(),
+            output_file: preview_file,
+        });
     }
     for asset in &assets.audio_tracks {
         compiled.push(write_asset_blob(
@@ -288,7 +325,10 @@ pub(crate) fn compile_placeholder_asset_packs(
         )?);
     }
 
-    Ok(CompiledAssetPack { assets: compiled })
+    Ok(CompiledAssetPack {
+        assets: compiled,
+        previews,
+    })
 }
 
 pub(crate) fn build_scene_load_packets(
@@ -375,7 +415,24 @@ pub(crate) fn render_pack_summary(
             packet.output_file
         ));
     }
+    if !compiled.previews.is_empty() {
+        out.push_str("\nPreview Images\n");
+        for preview in &compiled.previews {
+            out.push_str(&format!(
+                "- {} {} file={}\n",
+                preview.kind, preview.name, preview.output_file
+            ));
+        }
+    }
     out
+}
+
+#[derive(Debug, Clone)]
+struct EncodedSprite {
+    bytes: Vec<u8>,
+    preview_rgba: Vec<u8>,
+    width: u32,
+    height: u32,
 }
 
 fn load_backgrounds(dir: &Path) -> io::Result<Vec<BackgroundAsset>> {
@@ -403,6 +460,7 @@ fn load_palettes(dir: &Path) -> io::Result<Vec<PaletteAsset>> {
             name: required_string(&map, "name", &path)?,
             source: required_string(&map, "source", &path)?,
             cgram_slot: required_string(&map, "cgram_slot", &path)?,
+            preset: required_string(&map, "preset", &path)?,
             source_file: file_name_string(&path),
         });
     }
@@ -419,6 +477,8 @@ fn load_sprite_pages(dir: &Path) -> io::Result<Vec<SpritePageAsset>> {
             source: required_string(&map, "source", &path)?,
             palette: required_string(&map, "palette", &path)?,
             vram_slot: required_string(&map, "vram_slot", &path)?,
+            generator: optional_string(&map, "generator").unwrap_or_else(|| "raw".to_string()),
+            frame_count: optional_u8(&map, "frame_count").unwrap_or(1),
             source_file: file_name_string(&path),
         });
     }
@@ -458,6 +518,166 @@ fn write_asset_blob(
         output_file,
         byte_len: bytes.len(),
     })
+}
+
+fn encode_palette_blob(asset: &PaletteAsset) -> Vec<u8> {
+    let colors = palette_colors(&asset.preset);
+    let mut out = Vec::new();
+    out.extend_from_slice(b"PAL4");
+    out.extend_from_slice(&asset.id.to_le_bytes());
+    out.push(colors.len().min(255) as u8);
+    out.push(0);
+    for color in &colors {
+        out.extend_from_slice(color);
+    }
+    while out.len() % 16 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+fn encode_sprite_blob(
+    asset: &SpritePageAsset,
+    palettes: &[PaletteAsset],
+) -> io::Result<EncodedSprite> {
+    let palette = palettes
+        .iter()
+        .find(|item| item.name == asset.palette)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing sprite palette"))?;
+    match asset.generator.as_str() {
+        "breathing_ball" => encode_breathing_ball(asset, palette),
+        "raw" => Ok(EncodedSprite {
+            bytes: placeholder_blob("SPPK", asset.id, &asset.name, &asset.source, &asset.vram_slot),
+            preview_rgba: vec![0; 16 * 16 * 4],
+            width: 16,
+            height: 16,
+        }),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported sprite generator `{other}`"),
+        )),
+    }
+}
+
+fn encode_breathing_ball(asset: &SpritePageAsset, palette: &PaletteAsset) -> io::Result<EncodedSprite> {
+    let frame_count = asset.frame_count.max(1);
+    let width = 16u32;
+    let height = 16u32;
+    let preview_width = width * u32::from(frame_count);
+    let preview_height = height;
+    let mut preview_rgba = vec![0u8; (preview_width * preview_height * 4) as usize];
+    let palette_colors = palette_colors(&palette.preset);
+    let fg = palette_colors.get(1).copied().unwrap_or([255, 255, 255]);
+    let hi = palette_colors.get(2).copied().unwrap_or([255, 255, 255]);
+    let shadow = palette_colors.get(3).copied().unwrap_or([80, 80, 80]);
+    let mut out = Vec::new();
+    out.extend_from_slice(b"SPR4");
+    out.extend_from_slice(&asset.id.to_le_bytes());
+    out.push(frame_count);
+    out.push(width as u8);
+    out.push(height as u8);
+    out.push(0);
+
+    for frame in 0..frame_count {
+        let y_radius = match frame % 4 {
+            0 => 5.5,
+            1 => 4.5,
+            2 => 5.0,
+            _ => 6.0,
+        };
+        let x_radius = match frame % 4 {
+            0 => 5.5,
+            1 => 6.2,
+            2 => 5.8,
+            _ => 5.1,
+        };
+        let frame_pixels = breathing_ball_frame(width as usize, height as usize, x_radius, y_radius);
+        for (idx, value) in frame_pixels.iter().enumerate() {
+            out.push(*value);
+            let x = (idx as u32) % width;
+            let y = (idx as u32) / width;
+            let preview_x = frame as u32 * width + x;
+            let base = ((preview_y(preview_x, y, preview_width) * 4) as usize).min(preview_rgba.len().saturating_sub(4));
+            let rgba = match *value {
+                0 => [0, 0, 0, 0],
+                1 => [fg[0], fg[1], fg[2], 255],
+                2 => [hi[0], hi[1], hi[2], 255],
+                _ => [shadow[0], shadow[1], shadow[2], 255],
+            };
+            preview_rgba[base..base + 4].copy_from_slice(&rgba);
+        }
+    }
+    while out.len() % 16 != 0 {
+        out.push(0);
+    }
+    Ok(EncodedSprite {
+        bytes: out,
+        preview_rgba,
+        width: preview_width,
+        height: preview_height,
+    })
+}
+
+fn breathing_ball_frame(width: usize, height: usize, x_radius: f32, y_radius: f32) -> Vec<u8> {
+    let cx = (width as f32 - 1.0) / 2.0;
+    let cy = (height as f32 - 1.0) / 2.0;
+    let mut out = vec![0u8; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let dx = (x as f32 - cx) / x_radius;
+            let dy = (y as f32 - cy) / y_radius;
+            let dist = dx * dx + dy * dy;
+            let value = if dist <= 1.0 {
+                if dx < -0.2 && dy < -0.2 {
+                    2
+                } else if dy > 0.45 {
+                    3
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
+            out[y * width + x] = value;
+        }
+    }
+    out
+}
+
+fn preview_y(x: u32, y: u32, width: u32) -> u32 {
+    y * width + x
+}
+
+fn palette_colors(preset: &str) -> Vec<[u8; 3]> {
+    match preset {
+        "ball_player" => vec![
+            [0, 0, 0],
+            [231, 82, 82],
+            [255, 196, 196],
+            [142, 32, 48],
+        ],
+        "ball_npc" => vec![
+            [0, 0, 0],
+            [76, 182, 98],
+            [210, 255, 216],
+            [30, 94, 56],
+        ],
+        _ => vec![
+            [0, 0, 0],
+            [96, 120, 168],
+            [192, 210, 240],
+            [44, 56, 88],
+        ],
+    }
+}
+
+fn write_rgba_preview(path: &Path, width: u32, height: u32, rgba: &[u8]) -> io::Result<()> {
+    let file = fs::File::create(path)?;
+    let mut encoder = Encoder::new(file, width, height);
+    encoder.set_color(ColorType::Rgba);
+    encoder.set_depth(BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(io::Error::other)?;
+    writer.write_image_data(rgba).map_err(io::Error::other)
 }
 
 fn placeholder_blob(magic: &str, id: u16, name: &str, source: &str, target: &str) -> Vec<u8> {
@@ -536,6 +756,15 @@ fn validate_asset_bundle(bundle: &AssetBundle) -> io::Result<()> {
                 ),
             ));
         }
+        if sprite.generator != "breathing_ball" && sprite.generator != "raw" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "sprite page `{}` has unsupported generator `{}`",
+                    sprite.name, sprite.generator
+                ),
+            ));
+        }
     }
     for audio in &bundle.audio_tracks {
         if audio.kind != "music" && audio.kind != "sfx" {
@@ -590,6 +819,14 @@ fn required_string(
             format!("missing key `{key}` in {}", path.display()),
         )
     })
+}
+
+fn optional_string(map: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    map.get(key).cloned()
+}
+
+fn optional_u8(map: &BTreeMap<String, String>, key: &str) -> Option<u8> {
+    map.get(key).and_then(|raw| raw.parse::<u8>().ok())
 }
 
 fn file_name_string(path: &Path) -> String {
@@ -653,14 +890,43 @@ mod tests {
         .expect("bg main");
         fs::write(
             temp.join("assets/palettes/default.toml"),
-            render_palette_asset_stub("default", "default.pal", "palette0"),
+            render_palette_asset_stub("default", "default.pal", "palette0", "background_basic"),
         )
         .expect("palette");
         fs::write(
-            temp.join("assets/sprites/hero_main.toml"),
-            render_sprite_asset_stub("hero_main", "hero.png", "default", "sprite_tiles"),
+            temp.join("assets/palettes/player_ball.toml"),
+            render_palette_asset_stub("player_ball", "player_ball.pal", "palette4", "ball_player"),
+        )
+        .expect("palette player");
+        fs::write(
+            temp.join("assets/sprites/ball_player.toml"),
+            render_sprite_asset_stub(
+                "ball_player",
+                "ball_player.gen",
+                "player_ball",
+                "sprite_tiles",
+                "breathing_ball",
+                4,
+            ),
         )
         .expect("sprite");
+        fs::write(
+            temp.join("assets/palettes/npc_ball.toml"),
+            render_palette_asset_stub("npc_ball", "npc_ball.pal", "palette5", "ball_npc"),
+        )
+        .expect("palette npc");
+        fs::write(
+            temp.join("assets/sprites/ball_npc.toml"),
+            render_sprite_asset_stub(
+                "ball_npc",
+                "ball_npc.gen",
+                "npc_ball",
+                "sprite_tiles",
+                "breathing_ball",
+                4,
+            ),
+        )
+        .expect("sprite npc");
         fs::write(
             temp.join("assets/audio/title_theme.toml"),
             render_audio_asset_stub("title_theme", "title.spc", "music"),
@@ -681,7 +947,16 @@ mod tests {
             render_scene_stub("room_000", "bg_main", "8,8", "stage_01", false),
         )
         .expect("scene room");
-        fs::write(temp.join("entities/player.toml"), render_entity_stub()).expect("entity");
+        fs::write(
+            temp.join("entities/player.toml"),
+            render_entity_stub("player", "player", "ball_player", "player_ball", 2, 4, "basic"),
+        )
+        .expect("entity");
+        fs::write(
+            temp.join("entities/npc_ball.toml"),
+            render_entity_stub("npc_ball", "npc", "ball_npc", "npc_ball", 1, 0, "touch"),
+        )
+        .expect("npc entity");
         fs::write(temp.join("scripts/main.toml"), render_script_stub()).expect("script");
 
         let manifest = GameManifest {
@@ -700,7 +975,7 @@ mod tests {
         let summary = render_asset_summary(&bundle, &resolution);
         assert!(summary.contains("Resolved Room Assets"));
         assert_eq!(resolution.rooms.len(), 2);
-        assert_eq!(resolution.entities.len(), 1);
+        assert_eq!(resolution.entities.len(), 2);
 
         let compiled_assets =
             compile_placeholder_asset_packs(&temp.join("build/assets"), &bundle).expect("packs");

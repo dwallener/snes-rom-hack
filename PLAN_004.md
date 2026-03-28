@@ -386,6 +386,7 @@ Current state:
 - asset definitions are now authored as structured TOML stubs
 - `template build` resolves scene and entity references into stable-id asset tables with VRAM-slot assignments
 - `template build` now also emits placeholder binary packs and per-scene load packets for runtime-side consumption
+- sprite pages can now be procedurally generated into animated previewable assets, with player/NPC palette variants proving that the sprite pipeline can carry distinct in-game visuals
 
 ### Step 6. Add gameplay
 

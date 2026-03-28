@@ -23,6 +23,7 @@ pub(crate) struct EntityDef {
     pub id: String,
     pub kind: String,
     pub sprite_page: String,
+    pub palette: String,
     pub hitbox: String,
     pub speed: u16,
     pub jump: u16,
@@ -118,8 +119,8 @@ pub(crate) fn render_content_summary(content: &CompiledContent) -> String {
     out.push_str("\nEntities\n");
     for entity in &content.entities {
         out.push_str(&format!(
-            "- {} kind={} sprite_page={} attack={}\n",
-            entity.id, entity.kind, entity.sprite_page, entity.attack
+            "- {} kind={} sprite_page={} palette={} attack={}\n",
+            entity.id, entity.kind, entity.sprite_page, entity.palette, entity.attack
         ));
     }
 
@@ -238,6 +239,7 @@ fn load_entities(dir: &Path) -> io::Result<Vec<EntityDef>> {
             id: required_string(&map, "id", &path)?,
             kind: required_string(&map, "kind", &path)?,
             sprite_page: required_string(&map, "sprite_page", &path)?,
+            palette: required_string(&map, "palette", &path)?,
             hitbox: required_string(&map, "hitbox", &path)?,
             speed: required_u16(&map, "speed", &path)?,
             jump: required_u16(&map, "jump", &path)?,
@@ -335,7 +337,11 @@ mod tests {
             render_scene_stub("room_000", "bg_main", "8,8", "stage_01", false),
         )
         .expect("room scene");
-        fs::write(temp.join("entities/player.toml"), render_entity_stub()).expect("entity");
+        fs::write(
+            temp.join("entities/player.toml"),
+            render_entity_stub("player", "player", "ball_player", "player_ball", 2, 4, "basic"),
+        )
+        .expect("entity");
         fs::write(temp.join("scripts/main.toml"), render_script_stub()).expect("script");
 
         let manifest = GameManifest {

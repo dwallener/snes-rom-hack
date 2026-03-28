@@ -214,4 +214,5 @@ This is scaffold-only for now:
 - scene/entity/script TOML stubs are parsed and emitted as compiled manifest files under `content/`
 - asset TOML stubs are parsed into stable-id asset tables and resolved scene/entity references under `assets/`
 - placeholder binary asset packs and per-scene load packets are emitted for runtime consumption
+- sprite assets can now be procedurally generated as animated “breathing ball” previews for player/NPC validation
 - no engine/runtime ROM generation exists yet

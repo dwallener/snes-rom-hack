@@ -436,11 +436,37 @@ fn create_template_project(project: &Path, manifest: &GameManifest) -> io::Resul
     )?;
     fs::write(
         project.join("assets/palettes/default.toml"),
-        render_palette_asset_stub("default", "default.pal", "palette0"),
+        render_palette_asset_stub("default", "default.pal", "palette0", "background_basic"),
     )?;
     fs::write(
-        project.join("assets/sprites/hero_main.toml"),
-        render_sprite_asset_stub("hero_main", "hero_main.png", "default", "sprite_tiles"),
+        project.join("assets/palettes/player_ball.toml"),
+        render_palette_asset_stub("player_ball", "player_ball.pal", "palette4", "ball_player"),
+    )?;
+    fs::write(
+        project.join("assets/palettes/npc_ball.toml"),
+        render_palette_asset_stub("npc_ball", "npc_ball.pal", "palette5", "ball_npc"),
+    )?;
+    fs::write(
+        project.join("assets/sprites/ball_player.toml"),
+        render_sprite_asset_stub(
+            "ball_player",
+            "ball_player.gen",
+            "player_ball",
+            "sprite_tiles",
+            "breathing_ball",
+            4,
+        ),
+    )?;
+    fs::write(
+        project.join("assets/sprites/ball_npc.toml"),
+        render_sprite_asset_stub(
+            "ball_npc",
+            "ball_npc.gen",
+            "npc_ball",
+            "sprite_tiles",
+            "breathing_ball",
+            4,
+        ),
     )?;
     fs::write(
         project.join("assets/audio/title_theme.toml"),
@@ -460,7 +486,11 @@ fn create_template_project(project: &Path, manifest: &GameManifest) -> io::Resul
     )?;
     fs::write(
         project.join("entities/player.toml"),
-        render_entity_stub(),
+        render_entity_stub("player", "player", "ball_player", "player_ball", 2, 4, "basic"),
+    )?;
+    fs::write(
+        project.join("entities/npc_ball.toml"),
+        render_entity_stub("npc_ball", "npc", "ball_npc", "npc_ball", 1, 0, "touch"),
     )?;
     fs::write(
         project.join("scripts/main.toml"),
@@ -867,17 +897,28 @@ fn render_scene_stub(
     )
 }
 
-fn render_entity_stub() -> String {
-    concat!(
-        "id = \"player\"\n",
-        "kind = \"player\"\n",
-        "sprite_page = \"hero_main\"\n",
-        "hitbox = \"8,8,16,16\"\n",
-        "speed = 2\n",
-        "jump = 4\n",
-        "attack = \"basic\"\n"
+fn render_entity_stub(
+    id: &str,
+    kind: &str,
+    sprite_page: &str,
+    palette: &str,
+    speed: u16,
+    jump: u16,
+    attack: &str,
+) -> String {
+    format!(
+        concat!(
+            "id = \"{}\"\n",
+            "kind = \"{}\"\n",
+            "sprite_page = \"{}\"\n",
+            "palette = \"{}\"\n",
+            "hitbox = \"8,8,16,16\"\n",
+            "speed = {}\n",
+            "jump = {}\n",
+            "attack = \"{}\"\n"
+        ),
+        id, kind, sprite_page, palette, speed, jump, attack
     )
-    .to_string()
 }
 
 fn render_script_stub() -> String {
@@ -896,17 +937,31 @@ fn render_background_asset_stub(name: &str, source: &str, palette: &str, vram_sl
     )
 }
 
-fn render_palette_asset_stub(name: &str, source: &str, cgram_slot: &str) -> String {
+fn render_palette_asset_stub(name: &str, source: &str, cgram_slot: &str, preset: &str) -> String {
     format!(
-        "name = \"{}\"\nsource = \"{}\"\ncgram_slot = \"{}\"\n",
-        name, source, cgram_slot
+        "name = \"{}\"\nsource = \"{}\"\ncgram_slot = \"{}\"\npreset = \"{}\"\n",
+        name, source, cgram_slot, preset
     )
 }
 
-fn render_sprite_asset_stub(name: &str, source: &str, palette: &str, vram_slot: &str) -> String {
+fn render_sprite_asset_stub(
+    name: &str,
+    source: &str,
+    palette: &str,
+    vram_slot: &str,
+    generator: &str,
+    frame_count: u8,
+) -> String {
     format!(
-        "name = \"{}\"\nsource = \"{}\"\npalette = \"{}\"\nvram_slot = \"{}\"\n",
-        name, source, palette, vram_slot
+        concat!(
+            "name = \"{}\"\n",
+            "source = \"{}\"\n",
+            "palette = \"{}\"\n",
+            "vram_slot = \"{}\"\n",
+            "generator = \"{}\"\n",
+            "frame_count = {}\n"
+        ),
+        name, source, palette, vram_slot, generator, frame_count
     )
 }
 
@@ -926,7 +981,8 @@ mod tests {
     use super::{
         GameManifest, TemplateKind, default_content_contracts, default_memory_model, parse_manifest,
         render_content_contracts, render_entity_stub, render_manifest, render_memory_model,
-        render_scene_stub, render_script_stub, title_case, validate_project_layout,
+        render_palette_asset_stub, render_scene_stub, render_script_stub, render_sprite_asset_stub,
+        title_case, validate_project_layout,
     };
     use std::fs;
 
@@ -985,9 +1041,20 @@ mod tests {
 
     #[test]
     fn entity_and_script_stubs_are_structured() {
-        let entity = render_entity_stub();
+        let entity = render_entity_stub("player", "player", "ball_player", "player_ball", 2, 4, "basic");
         let script = render_script_stub();
-        assert!(entity.contains("sprite_page = \"hero_main\""));
+        assert!(entity.contains("sprite_page = \"ball_player\""));
+        assert!(entity.contains("palette = \"player_ball\""));
         assert!(script.contains("on_boot = \"load_scene title_room\""));
+    }
+
+    #[test]
+    fn palette_and_sprite_asset_stubs_include_generator_metadata() {
+        let palette = render_palette_asset_stub("player_ball", "player_ball.pal", "palette4", "ball_player");
+        let sprite =
+            render_sprite_asset_stub("ball_player", "ball_player.gen", "player_ball", "sprite_tiles", "breathing_ball", 4);
+        assert!(palette.contains("preset = \"ball_player\""));
+        assert!(sprite.contains("generator = \"breathing_ball\""));
+        assert!(sprite.contains("frame_count = 4"));
     }
 }
