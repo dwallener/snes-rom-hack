@@ -349,16 +349,20 @@ fn create_template_project(project: &Path, manifest: &GameManifest) -> io::Resul
     )?;
     fs::write(project.join("README.md"), render_project_readme(manifest))?;
     fs::write(
-        project.join("scenes/room_000.txt"),
-        "; single-screen-action scene stub\nid = room_000\nbackground = bg_main\nplayer_spawn = 8,8\n",
+        project.join("scenes/title_room.toml"),
+        render_scene_stub("title_room", "bg_title", "12,14", "title_theme", true),
     )?;
     fs::write(
-        project.join("entities/player.txt"),
-        "; player entity stub\nid = player\nkind = player\nsprite = hero_idle\n",
+        project.join("scenes/room_000.toml"),
+        render_scene_stub("room_000", "bg_main", "8,8", "stage_01", false),
     )?;
     fs::write(
-        project.join("scripts/main.txt"),
-        "; script stub\non_boot: load_scene room_000\n",
+        project.join("entities/player.toml"),
+        render_entity_stub(),
+    )?;
+    fs::write(
+        project.join("scripts/main.toml"),
+        render_script_stub(),
     )?;
 
     Ok(())
@@ -672,6 +676,10 @@ fn format_asset_summary(project: &Path, manifest: &GameManifest) -> io::Result<S
         let count = fs::read_dir(project.join(dir))?.count();
         out.push_str(&format!("{dir}: {count} entries\n"));
     }
+    for dir in ["scenes", "entities", "scripts"] {
+        let count = fs::read_dir(project.join(dir))?.count();
+        out.push_str(&format!("{dir}: {count} entries\n"));
+    }
     out.push('\n');
     for file in ["memory.toml", "contracts.toml"] {
         let bytes = fs::read_to_string(project.join(file))?.len();
@@ -682,7 +690,7 @@ fn format_asset_summary(project: &Path, manifest: &GameManifest) -> io::Result<S
 
 fn render_project_readme(manifest: &GameManifest) -> String {
     format!(
-        "# {}\n\nTemplate: `{}`\n\nThis project was initialized by `template init`.\n\nKey files:\n\n- `game.toml`: project manifest\n- `memory.toml`: cartridge memory layout and DMA budgets\n- `contracts.toml`: content limits and compile-time contracts\n\nNext steps:\n\n1. review `memory.toml` and `contracts.toml`\n2. add placeholder assets under `assets/`\n3. define your first room in `scenes/room_000.txt`\n4. run `cargo run -- template validate --project {}`\n5. run `cargo run -- template build --project {} --out build/{}`\n",
+        "# {}\n\nTemplate: `{}`\n\nThis project was initialized by `template init`.\n\nKey files:\n\n- `game.toml`: project manifest\n- `memory.toml`: cartridge memory layout and DMA budgets\n- `contracts.toml`: content limits and compile-time contracts\n- `scenes/title_room.toml`: startup title-room definition\n- `scenes/room_000.toml`: first gameplay room definition\n- `entities/player.toml`: player entity contract stub\n- `scripts/main.toml`: boot flow stub\n\nNext steps:\n\n1. review `memory.toml` and `contracts.toml`\n2. add placeholder assets under `assets/`\n3. define your title and first gameplay room in `scenes/*.toml`\n4. run `cargo run -- template validate --project {}`\n5. run `cargo run -- template build --project {} --out build/{}`\n",
         manifest.title,
         template_kind_name(manifest.template),
         manifest.name,
@@ -729,6 +737,56 @@ fn title_case(raw: &str) -> String {
         .join(" ")
 }
 
+fn render_scene_stub(
+    id: &str,
+    background: &str,
+    player_spawn: &str,
+    music: &str,
+    is_title: bool,
+) -> String {
+    format!(
+        concat!(
+            "id = \"{}\"\n",
+            "kind = \"{}\"\n",
+            "background = \"{}\"\n",
+            "palette = \"default\"\n",
+            "music = \"{}\"\n",
+            "player_spawn = \"{}\"\n",
+            "enemy_set = \"{}\"\n",
+            "next_scene = \"{}\"\n"
+        ),
+        id,
+        if is_title { "title" } else { "gameplay" },
+        background,
+        music,
+        player_spawn,
+        if is_title { "none" } else { "room_000_enemies" },
+        if is_title { "room_000" } else { "room_001" }
+    )
+}
+
+fn render_entity_stub() -> String {
+    concat!(
+        "id = \"player\"\n",
+        "kind = \"player\"\n",
+        "sprite_page = \"hero_main\"\n",
+        "hitbox = \"8,8,16,16\"\n",
+        "speed = 2\n",
+        "jump = 4\n",
+        "attack = \"basic\"\n"
+    )
+    .to_string()
+}
+
+fn render_script_stub() -> String {
+    concat!(
+        "on_boot = \"load_scene title_room\"\n",
+        "on_game_over = \"load_scene title_room\"\n",
+        "on_room_clear = \"load_scene room_001\"\n"
+    )
+    .to_string()
+}
+
 fn to_io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
@@ -737,8 +795,8 @@ fn to_io_error(error: impl std::fmt::Display) -> io::Error {
 mod tests {
     use super::{
         GameManifest, TemplateKind, default_content_contracts, default_memory_model, parse_manifest,
-        render_content_contracts, render_manifest, render_memory_model, title_case,
-        validate_project_layout,
+        render_content_contracts, render_entity_stub, render_manifest, render_memory_model,
+        render_scene_stub, render_script_stub, title_case, validate_project_layout,
     };
     use std::fs;
 
@@ -784,5 +842,22 @@ mod tests {
             render_content_contracts(&default_content_contracts(TemplateKind::SingleScreenAction));
         assert!(text.contains("[scenes]"));
         assert!(text.contains("max_entities_per_room = 24"));
+    }
+
+    #[test]
+    fn scene_stub_tracks_title_vs_gameplay_kind() {
+        let title = render_scene_stub("title_room", "bg_title", "12,14", "title_theme", true);
+        let gameplay = render_scene_stub("room_000", "bg_main", "8,8", "stage_01", false);
+        assert!(title.contains("kind = \"title\""));
+        assert!(gameplay.contains("kind = \"gameplay\""));
+        assert!(gameplay.contains("next_scene = \"room_001\""));
+    }
+
+    #[test]
+    fn entity_and_script_stubs_are_structured() {
+        let entity = render_entity_stub();
+        let script = render_script_stub();
+        assert!(entity.contains("sprite_page = \"hero_main\""));
+        assert!(script.contains("on_boot = \"load_scene title_room\""));
     }
 }

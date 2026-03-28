@@ -210,4 +210,5 @@ This is scaffold-only for now:
 - validation exists
 - build-plan emission exists
 - runtime layout and engine stub emission exist under `engine/`
+- reset/NMI, joypad, DMA queue, and room-load contracts are described in the generated runtime files
 - no engine/runtime ROM generation exists yet

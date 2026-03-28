@@ -359,6 +359,11 @@ Current state:
   - frame schedule
   - scene flow
   - stub engine entrypoints
+- runtime files now also define:
+  - reset/bootstrap state ownership
+  - joypad snapshot and edge state
+  - DMA queue descriptor shape
+  - minimal title/room load sequence
 
 ### Step 5. Build the authoring/build loop
 
