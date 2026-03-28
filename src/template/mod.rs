@@ -1,3 +1,4 @@
+mod assets;
 mod content;
 mod runtime;
 
@@ -5,6 +6,7 @@ use serde::Serialize;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use assets::{load_asset_bundle, render_asset_summary, resolve_asset_references};
 use content::{build_room_asset_table, load_compiled_content, render_content_summary};
 use runtime::{default_runtime_skeleton, render_engine_stub, render_runtime_summary};
 
@@ -209,6 +211,7 @@ fn run_template_validate_cli(args: &[String]) -> io::Result<()> {
     let project = parse_project_arg(args, "template validate --project <dir>")?;
     let manifest = load_manifest(&project)?;
     let contracts = default_content_contracts(manifest.template);
+    load_asset_bundle(&project, manifest.template)?;
     let issues = validate_project_layout(&project);
     if issues.is_empty() {
         load_compiled_content(&project, &manifest, &contracts)?;
@@ -227,8 +230,14 @@ fn run_template_preview_assets_cli(args: &[String]) -> io::Result<()> {
     let manifest = load_manifest(&project)?;
     let contracts = default_content_contracts(manifest.template);
     let content = load_compiled_content(&project, &manifest, &contracts)?;
+    let assets = load_asset_bundle(&project, manifest.template)?;
+    let resolution = resolve_asset_references(&content, &assets, &build_room_asset_table(&content))?;
     let summary = format_asset_summary(&project, &manifest)?;
-    println!("{summary}\n{}", render_content_summary(&content));
+    println!(
+        "{summary}\n{}\n{}",
+        render_content_summary(&content),
+        render_asset_summary(&assets, &resolution)
+    );
     Ok(())
 }
 
@@ -279,12 +288,15 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, issues.join("; ")));
     }
     let content = load_compiled_content(&project, &manifest, &contracts)?;
+    let assets = load_asset_bundle(&project, manifest.template)?;
     let room_table = build_room_asset_table(&content);
+    let asset_resolution = resolve_asset_references(&content, &assets, &room_table)?;
 
     fs::create_dir_all(&out_dir)?;
     let runtime = default_runtime_skeleton(manifest.template);
     fs::create_dir_all(out_dir.join("engine"))?;
     fs::create_dir_all(out_dir.join("content"))?;
+    fs::create_dir_all(out_dir.join("assets"))?;
     let plan = BuildPlan {
         project: &manifest.name,
         template: manifest.template,
@@ -298,6 +310,9 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
             "content/scene_manifest.json",
             "content/room_asset_table.json",
             "content/content_summary.txt",
+            "assets/asset_manifest.json",
+            "assets/asset_resolution.json",
+            "assets/asset_summary.txt",
             "assets/compiled/*.bin (not implemented yet)",
             "memory layout and content contract reports",
             "build manifest and validation reports",
@@ -311,7 +326,7 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("build_notes.txt"),
         format!(
-            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml,scenes/*.toml,entities/*.toml,scripts/*.toml\nengine=engine/runtime_stub.asm\ncontent=content/scene_manifest.json\n",
+            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml,assets/**/*.toml,scenes/*.toml,entities/*.toml,scripts/*.toml\nengine=engine/runtime_stub.asm\ncontent=content/scene_manifest.json\nassets=assets/asset_manifest.json\n",
             manifest.name,
             template_kind_name(manifest.template),
             runtime.status
@@ -340,6 +355,18 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("content/content_summary.txt"),
         render_content_summary(&content),
+    )?;
+    fs::write(
+        out_dir.join("assets/asset_manifest.json"),
+        serde_json::to_vec_pretty(&assets).map_err(to_io_error)?,
+    )?;
+    fs::write(
+        out_dir.join("assets/asset_resolution.json"),
+        serde_json::to_vec_pretty(&asset_resolution).map_err(to_io_error)?,
+    )?;
+    fs::write(
+        out_dir.join("assets/asset_summary.txt"),
+        render_asset_summary(&assets, &asset_resolution),
     )?;
 
     println!(
@@ -373,6 +400,30 @@ fn create_template_project(project: &Path, manifest: &GameManifest) -> io::Resul
         render_content_contracts(&default_content_contracts(manifest.template)),
     )?;
     fs::write(project.join("README.md"), render_project_readme(manifest))?;
+    fs::write(
+        project.join("assets/backgrounds/bg_title.toml"),
+        render_background_asset_stub("bg_title", "bg_title.png", "default", "bg_tiles"),
+    )?;
+    fs::write(
+        project.join("assets/backgrounds/bg_main.toml"),
+        render_background_asset_stub("bg_main", "bg_main.png", "default", "bg_tiles"),
+    )?;
+    fs::write(
+        project.join("assets/palettes/default.toml"),
+        render_palette_asset_stub("default", "default.pal", "palette0"),
+    )?;
+    fs::write(
+        project.join("assets/sprites/hero_main.toml"),
+        render_sprite_asset_stub("hero_main", "hero_main.png", "default", "sprite_tiles"),
+    )?;
+    fs::write(
+        project.join("assets/audio/title_theme.toml"),
+        render_audio_asset_stub("title_theme", "title_theme.spc", "music"),
+    )?;
+    fs::write(
+        project.join("assets/audio/stage_01.toml"),
+        render_audio_asset_stub("stage_01", "stage_01.spc", "music"),
+    )?;
     fs::write(
         project.join("scenes/title_room.toml"),
         render_scene_stub("title_room", "bg_title", "12,14", "title_theme", true),
@@ -715,7 +766,7 @@ fn format_asset_summary(project: &Path, manifest: &GameManifest) -> io::Result<S
 
 fn render_project_readme(manifest: &GameManifest) -> String {
     format!(
-        "# {}\n\nTemplate: `{}`\n\nThis project was initialized by `template init`.\n\nKey files:\n\n- `game.toml`: project manifest\n- `memory.toml`: cartridge memory layout and DMA budgets\n- `contracts.toml`: content limits and compile-time contracts\n- `scenes/title_room.toml`: startup title-room definition\n- `scenes/room_000.toml`: first gameplay room definition\n- `entities/player.toml`: player entity contract stub\n- `scripts/main.toml`: boot flow stub\n\nBuild outputs now include:\n\n- `content/scene_manifest.json`: compiled scene/entity/script manifest\n- `content/room_asset_table.json`: per-scene background/music/transition table\n- `engine/runtime_summary.txt`: runtime layout summary\n\nNext steps:\n\n1. review `memory.toml` and `contracts.toml`\n2. add placeholder assets under `assets/`\n3. define your title and first gameplay room in `scenes/*.toml`\n4. run `cargo run -- template validate --project {}`\n5. run `cargo run -- template build --project {} --out build/{}`\n",
+        "# {}\n\nTemplate: `{}`\n\nThis project was initialized by `template init`.\n\nKey files:\n\n- `game.toml`: project manifest\n- `memory.toml`: cartridge memory layout and DMA budgets\n- `contracts.toml`: content limits and compile-time contracts\n- `assets/backgrounds/*.toml`: background asset definitions\n- `assets/palettes/*.toml`: palette definitions\n- `assets/sprites/*.toml`: sprite page definitions\n- `assets/audio/*.toml`: music and SFX definitions\n- `scenes/title_room.toml`: startup title-room definition\n- `scenes/room_000.toml`: first gameplay room definition\n- `entities/player.toml`: player entity contract stub\n- `scripts/main.toml`: boot flow stub\n\nBuild outputs now include:\n\n- `content/scene_manifest.json`: compiled scene/entity/script manifest\n- `content/room_asset_table.json`: per-scene background/music/transition table\n- `assets/asset_manifest.json`: compiled asset registry with stable ids\n- `assets/asset_resolution.json`: resolved scene/entity asset references\n- `engine/runtime_summary.txt`: runtime layout summary\n\nNext steps:\n\n1. review `memory.toml` and `contracts.toml`\n2. replace placeholder asset definitions under `assets/`\n3. define your title and first gameplay room in `scenes/*.toml`\n4. run `cargo run -- template validate --project {}`\n5. run `cargo run -- template build --project {} --out build/{}`\n",
         manifest.title,
         template_kind_name(manifest.template),
         manifest.name,
@@ -810,6 +861,34 @@ fn render_script_stub() -> String {
         "on_room_clear = \"load_scene room_001\"\n"
     )
     .to_string()
+}
+
+fn render_background_asset_stub(name: &str, source: &str, palette: &str, vram_slot: &str) -> String {
+    format!(
+        "name = \"{}\"\nsource = \"{}\"\npalette = \"{}\"\nvram_slot = \"{}\"\n",
+        name, source, palette, vram_slot
+    )
+}
+
+fn render_palette_asset_stub(name: &str, source: &str, cgram_slot: &str) -> String {
+    format!(
+        "name = \"{}\"\nsource = \"{}\"\ncgram_slot = \"{}\"\n",
+        name, source, cgram_slot
+    )
+}
+
+fn render_sprite_asset_stub(name: &str, source: &str, palette: &str, vram_slot: &str) -> String {
+    format!(
+        "name = \"{}\"\nsource = \"{}\"\npalette = \"{}\"\nvram_slot = \"{}\"\n",
+        name, source, palette, vram_slot
+    )
+}
+
+fn render_audio_asset_stub(name: &str, source: &str, kind: &str) -> String {
+    format!(
+        "name = \"{}\"\nsource = \"{}\"\nkind = \"{}\"\n",
+        name, source, kind
+    )
 }
 
 fn to_io_error(error: impl std::fmt::Display) -> io::Error {

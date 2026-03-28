@@ -212,4 +212,5 @@ This is scaffold-only for now:
 - runtime layout and engine stub emission exist under `engine/`
 - reset/NMI, joypad, DMA queue, and room-load contracts are described in the generated runtime files
 - scene/entity/script TOML stubs are parsed and emitted as compiled manifest files under `content/`
+- asset TOML stubs are parsed into stable-id asset tables and resolved scene/entity references under `assets/`
 - no engine/runtime ROM generation exists yet

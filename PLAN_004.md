@@ -383,6 +383,8 @@ Current state:
 - scenes, entities, and scripts are now authored as structured TOML stubs
 - `template validate` parses and validates those files against the single-screen contracts
 - `template build` now emits compiled content manifests and room asset tables
+- asset definitions are now authored as structured TOML stubs
+- `template build` resolves scene and entity references into stable-id asset tables with VRAM-slot assignments
 
 ### Step 6. Add gameplay
 
