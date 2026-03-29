@@ -242,6 +242,11 @@ with tab_run:
             st.success("build ok")
         else:
             st.error("build failed")
+    rom_files = sorted(build_out.glob("*.sfc"))
+    if rom_files:
+        st.subheader("ROM Output")
+        for rom in rom_files:
+            st.code(str(rom), language="text")
     if col3.button("Simulate", use_container_width=True):
         code, output = run_cmd(
             [

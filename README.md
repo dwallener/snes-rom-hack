@@ -197,7 +197,7 @@ Preview the current asset tree:
 cargo run -- template preview-assets --project /tmp/template-demo
 ```
 
-Emit the current build scaffold:
+Emit the current build scaffold and a minimal emulator-loadable `.sfc`:
 
 ```bash
 cargo run -- template build --project /tmp/template-demo --out /tmp/template-demo-build
@@ -232,6 +232,7 @@ The app currently:
 - runs `template validate`
 - runs `template build`
 - runs `template simulate`
+- shows the generated `.sfc` path when build emits a ROM
 - shows generated preview images and logs
 
 This is scaffold-only for now:

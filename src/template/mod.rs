@@ -1,6 +1,7 @@
 mod assets;
 mod content;
 mod engine;
+mod rom;
 mod runtime;
 mod sim;
 
@@ -14,6 +15,7 @@ use assets::{
 };
 use content::{build_room_asset_table, load_compiled_content, render_content_summary};
 use engine::{build_engine_plan, render_engine_build_summary, render_engine_frame_logic};
+use rom::build_bootable_rom;
 use runtime::{default_runtime_skeleton, render_engine_stub, render_runtime_summary};
 
 const REQUIRED_DIRS: &[&str] = &[
@@ -341,6 +343,8 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
             "content/scene_packets.json",
             "content/previews/*.png",
             "content/scene_previews.json",
+            "*.sfc",
+            "rom_summary.txt",
             "memory layout and content contract reports",
             "build manifest and validation reports",
         ],
@@ -353,10 +357,11 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
     fs::write(
         out_dir.join("build_notes.txt"),
         format!(
-            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml,assets/**/*.toml,scenes/*.toml,entities/*.toml,scripts/*.toml\nengine=engine/runtime_stub.asm\ncontent=content/scene_manifest.json\nassets=assets/asset_manifest.json\ncompiled=assets/compiled/*.bin\n",
+            "Template build scaffold\nproject={}\ntemplate={}\nstatus={}\ninputs=game.toml,memory.toml,contracts.toml,assets/**/*.toml,scenes/*.toml,entities/*.toml,scripts/*.toml\nengine=engine/runtime_stub.asm\ncontent=content/scene_manifest.json\nassets=assets/asset_manifest.json\ncompiled=assets/compiled/*.bin\nrom={}.sfc\n",
             manifest.name,
             template_kind_name(manifest.template),
-            runtime.status
+            runtime.status,
+            manifest.name
         ),
     )?;
     fs::write(
@@ -423,11 +428,21 @@ fn run_template_build_cli(args: &[String]) -> io::Result<()> {
         out_dir.join("content/scene_previews.json"),
         serde_json::to_vec_pretty(&scene_previews).map_err(to_io_error)?,
     )?;
+    let rom_artifact = build_bootable_rom(
+        &out_dir,
+        &manifest,
+        &content,
+        &assets,
+        &asset_resolution,
+        &engine_plan,
+    )?;
+    fs::write(out_dir.join("rom_summary.txt"), rom_artifact.summary)?;
 
     println!(
-        "prepared template build scaffold {} -> {}",
+        "prepared template build scaffold {} -> {} (rom: {})",
         project.display(),
-        out_dir.display()
+        out_dir.display(),
+        rom_artifact.rom_path.display()
     );
     Ok(())
 }

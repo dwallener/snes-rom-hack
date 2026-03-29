@@ -36,6 +36,7 @@ The current generation pipeline already has:
 - procedural placeholder sprites
 - movement simulation
 - generated engine-frame contracts
+- minimal bootable `.sfc` emission for the single-screen-action template
 
 That means a webapp can now sit on top of real pipeline pieces instead of inventing a parallel authoring model.
 
@@ -49,6 +50,7 @@ It should do four things:
 2. edit the small set of supported gameplay and asset fields
 3. run validate/build/simulate
 4. show logs and generated preview images
+5. surface the generated ROM path when build emits a cartridge
 
 It should not try to be a full editor.
 
@@ -100,6 +102,8 @@ Then call:
 - `cargo run -- template build ...`
 - `cargo run -- template simulate ...`
 
+`template build` now also emits a minimal emulator-loadable `.sfc` and `rom_summary.txt`.
+
 ## UI Sections
 
 The first version should have:
@@ -141,6 +145,7 @@ Do not add yet:
 - change the player and enemy settings
 - change the background/music bindings
 - press a big build/simulate button
+- get a real `.sfc` they can load in an emulator
 - see generated preview frames and logs
 
 That is the first real designer loop.
