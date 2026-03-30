@@ -1,6 +1,17 @@
+# Ulimate Goal
+
+Combine this work, which is in a great state now, with the design scaffolding:
+https://github.com/dwallener/snes-builder
+
+Create a user-facing app the leverages the design scaffolding into assets for the ROM generator.
+
 # SNES ROM Hack Tools
 
-This crate now includes a first-pass static SNES ROM disassembler and code mapper for LoROM 65816 games.
+This crate now includes a first-pass static SNES ROM disassembler and code mapper for LoROM 65816 games. The tracing and dissassemgly is used in the ROM generator to produce playabe SNES ROMs.
+
+Yes, it works...this can now go from prompt to ROM that runs in any of the usual emulators.
+
+https://streamable.com/9ndgi4
 
 ## Disassembler
 
